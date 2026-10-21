@@ -1,6 +1,6 @@
 import { FailureCode } from '../../domain/wagering/failure-code';
 import { WagerTransactionStatus } from '../../domain/wagering/wager-transaction';
-import { TransientInfrastructureError } from '../errors';
+import { DuplicateTransactionError, TransientInfrastructureError } from '../errors';
 import { AppLogger, Clock, Metrics } from '../ports/system';
 import { UnitOfWork } from '../ports/unit-of-work';
 import { WagerSettlementService } from './wager-settlement.service';
@@ -64,13 +64,14 @@ export class RetryPendingReferencesUseCase {
           });
         }
       } catch (error) {
-        if (error instanceof TransientInfrastructureError) {
-          // Tenta de novo no próximo ciclo; a linha continua PENDING_REFERENCE e due.
+        if (error instanceof TransientInfrastructureError || error instanceof DuplicateTransactionError) {
+          // Tenta de novo no próximo ciclo; a linha continua PENDING_REFERENCE e due. Uma corrida no
+          // índice de reversão única, por exemplo, vira ALREADY_REVERSED na próxima verificação.
           this.metrics.retry('pending_reference');
           this.logger.warn('pending reference retry deferred', {
             transactionId: candidate.transactionId,
             walletId: candidate.walletId,
-            reason: error.reason,
+            reason: error.code,
           });
           continue;
         }

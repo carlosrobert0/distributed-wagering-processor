@@ -1,0 +1,102 @@
+import { LockMode } from '@mikro-orm/core';
+import { EntityManager } from '@mikro-orm/postgresql';
+import { DuplicateTransactionError } from '../../../application/errors';
+import { PendingReferenceCandidate, WagerTransactionRepository } from '../../../application/ports/repositories';
+import { WagerTransaction, WagerTransactionKind, WagerTransactionStatus } from '../../../domain/wagering/wager-transaction';
+import { constraintOf, isUniqueViolation } from '../database-errors';
+import { WagerTransactionMapper } from '../mappers';
+import { WagerTransactionRecord } from '../records';
+
+const FRESH = { disableIdentityMap: true } as const;
+const REVERSAL_KINDS = [WagerTransactionKind.Refund, WagerTransactionKind.Rollback];
+
+export class MikroOrmWagerTransactionRepository implements WagerTransactionRepository {
+  constructor(private readonly em: EntityManager) {}
+
+  async findById(id: string): Promise<WagerTransaction | null> {
+    return this.toDomain(await this.em.findOne(WagerTransactionRecord, { id }, FRESH));
+  }
+
+  async findByIdempotencyKey(idempotencyKey: string): Promise<WagerTransaction | null> {
+    return this.toDomain(await this.em.findOne(WagerTransactionRecord, { idempotencyKey }, FRESH));
+  }
+
+  async findByExternalId(providerId: string, externalTransactionId: string): Promise<WagerTransaction | null> {
+    return this.toDomain(await this.em.findOne(WagerTransactionRecord, { providerId, externalTransactionId }, FRESH));
+  }
+
+  async insert(transaction: WagerTransaction): Promise<void> {
+    try {
+      await this.em.insert(WagerTransactionRecord, WagerTransactionMapper.toRecord(transaction, new Date()));
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        // idempotency_key, (provider, external id) ou reversão única: outra instância chegou antes.
+        throw new DuplicateTransactionError(constraintOf(error));
+      }
+      throw error;
+    }
+  }
+
+  async update(transaction: WagerTransaction): Promise<void> {
+    try {
+      const affected = await this.em.nativeUpdate(
+        WagerTransactionRecord,
+        { id: transaction.id },
+        WagerTransactionMapper.toStateChange(transaction, new Date()),
+      );
+      if (affected !== 1) {
+        throw new Error(`Wager transaction ${transaction.id} not found for update`);
+      }
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        throw new DuplicateTransactionError(constraintOf(error));
+      }
+      throw error;
+    }
+  }
+
+  async hasProcessedReversal(referenceTransactionId: string): Promise<boolean> {
+    const count = await this.em.count(WagerTransactionRecord, {
+      referenceTransactionId,
+      kind: { $in: REVERSAL_KINDS },
+      status: WagerTransactionStatus.Processed,
+    });
+    return count > 0;
+  }
+
+  async wakeDependents(providerId: string, externalTransactionId: string, now: Date): Promise<number> {
+    return this.em.nativeUpdate(
+      WagerTransactionRecord,
+      {
+        status: WagerTransactionStatus.PendingReference,
+        providerId,
+        referenceExternalTransactionId: externalTransactionId,
+        nextReferenceCheckAt: { $gt: now },
+      },
+      { nextReferenceCheckAt: now, updatedAt: now },
+    );
+  }
+
+  async findDuePendingReferences(now: Date, limit: number): Promise<PendingReferenceCandidate[]> {
+    const records = await this.em.find(
+      WagerTransactionRecord,
+      { status: WagerTransactionStatus.PendingReference, nextReferenceCheckAt: { $lte: now } },
+      { ...FRESH, orderBy: { nextReferenceCheckAt: 'asc' }, limit },
+    );
+    return records.map((record) => ({ transactionId: record.id, walletId: record.walletId }));
+  }
+
+  async lockDuePendingReference(id: string, now: Date): Promise<WagerTransaction | null> {
+    // FOR UPDATE SKIP LOCKED: se outra instância já pegou esta linha, pulamos em vez de esperar.
+    const record = await this.em.findOne(
+      WagerTransactionRecord,
+      { id, status: WagerTransactionStatus.PendingReference, nextReferenceCheckAt: { $lte: now } },
+      { ...FRESH, lockMode: LockMode.PESSIMISTIC_PARTIAL_WRITE },
+    );
+    return this.toDomain(record);
+  }
+
+  private toDomain(record: WagerTransactionRecord | null): WagerTransaction | null {
+    return record ? WagerTransactionMapper.toDomain(record) : null;
+  }
+}
