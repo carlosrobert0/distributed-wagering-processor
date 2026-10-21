@@ -1,0 +1,39 @@
+{
+  "name": "distributed-wagering-processor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Serviço financeiro distribuído que processa transações de apostas de múltiplos provedores (desafio Jungle Gaming).",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "dev": "bun --watch run src/main.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "migration:up": "bun run src/infrastructure/persistence/migrate.ts up",
+    "migration:down": "bun run src/infrastructure/persistence/migrate.ts down",
+    "test": "bun test --timeout 60000",
+    "test:unit": "bun test test/unit",
+    "test:integration": "bun test --timeout 60000 test/integration",
+    "test:concurrency": "bun test --timeout 120000 test/concurrency",
+    "test:load": "bun run test/load/load-test.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-sqs": "^3.700.0",
+    "@mikro-orm/core": "^7.2.5",
+    "@mikro-orm/migrations": "^7.2.5",
+    "@mikro-orm/postgresql": "^7.2.5",
+    "@nestjs/common": "^11.1.0",
+    "@nestjs/core": "^11.1.0",
+    "@nestjs/platform-express": "^11.1.0",
+    "pino": "^9.5.0",
+    "prom-client": "^15.1.3",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "uuid": "^11.0.3",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0",
+    "@types/express": "^5.0.0",
+    "typescript": "^5.7.2"
+  }
+}
