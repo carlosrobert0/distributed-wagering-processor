@@ -61,7 +61,13 @@ export class ProcessWagerTransactionUseCase {
       // Valida a forma uma vez, antes de tocar no banco: payload inválido nunca abre transação.
       const probe = this.buildDraft(command);
 
-      const fastReplay = await this.uow.run((scope) => this.findExisting(scope, probe));
+      const fastReplay = await this.uow.run(async (scope) => {
+        // Redelivery da fila: a inbox (consumerName, messageId) reconhece a mensagem já processada.
+        if (ctx.inbox && (await scope.inbox.find(ctx.inbox.consumerName, ctx.inbox.messageId))) {
+          this.metrics.duplicateDetected('inbox_duplicate');
+        }
+        return this.findExisting(scope, probe);
+      });
       if (fastReplay) {
         return this.replay(fastReplay, probe);
       }
