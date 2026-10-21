@@ -19,10 +19,6 @@ export const sqs: SQSClient = createSqsClient({
   secretAccessKey: 'test',
 });
 
-/**
- * Cria filas FIFO exclusivas para um arquivo de teste (comando + DLQ com redrive + eventos),
- * para que testes não consumam mensagens uns dos outros.
- */
 export async function createTestQueues(
   options: { maxReceiveCount?: number; visibilityTimeoutSeconds?: number } = {},
 ): Promise<TestQueues & { cleanup: () => Promise<void> }> {
@@ -96,7 +92,6 @@ export interface WagerMessageData {
   referenceExternalTransactionId?: string;
 }
 
-/** Envia um `WagerTransactionRequested` no formato do §10. */
 export async function sendWagerMessage(
   queueName: string,
   data: WagerMessageData,
@@ -126,7 +121,6 @@ export async function sendRawMessage(
   );
 }
 
-/** Lê (sem apagar) as mensagens disponíveis numa fila. */
 export async function peekMessages(queueName: string, waitSeconds = 1, visibilitySeconds = 0): Promise<Message[]> {
   const result = await sqs.send(
     new ReceiveMessageCommand({
@@ -142,7 +136,6 @@ export async function peekMessages(queueName: string, waitSeconds = 1, visibilit
   return result.Messages ?? [];
 }
 
-/** Drena a fila (recebe até ficar vazia) e devolve os corpos. Mensagens ficam invisíveis por `visibilitySeconds`. */
 export async function drainMessages(queueName: string, visibilitySeconds = 60): Promise<Message[]> {
   const all: Message[] = [];
   for (let round = 0; round < 50; round++) {

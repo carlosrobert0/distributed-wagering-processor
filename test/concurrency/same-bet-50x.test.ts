@@ -5,7 +5,6 @@ import { countRows, expectWalletMatchesLedger, ledgerRows, walletRow } from '../
 import { wager } from '../support/http';
 import { createTestQueues } from '../support/sqs';
 
-/** §13 concorrência 1: a mesma aposta enviada 50 vezes em paralelo → um único débito. */
 describe('a mesma aposta 50× em paralelo', () => {
   let ctx: TestApp;
   let cleanup: () => Promise<void>;
@@ -42,7 +41,9 @@ describe('a mesma aposta 50× em paralelo', () => {
     expect((await walletRow(wallet.id)).balance).toBe('975.00');
     expect((await ledgerRows(wallet.id)).filter((entry) => entry.direction === 'DEBIT')).toHaveLength(1);
     expect(
-      await countRows(`SELECT COUNT(*) FROM wager_transactions WHERE external_transaction_id = $1`, [bet.externalTransactionId]),
+      await countRows(`SELECT COUNT(*) FROM wager_transactions WHERE external_transaction_id = $1`, [
+        bet.externalTransactionId,
+      ]),
     ).toBe(1);
     await expectWalletMatchesLedger(wallet.id);
   });

@@ -19,7 +19,6 @@ export interface TestApp {
   close: () => Promise<void>;
 }
 
-/** Sobe a aplicação real (Nest + MikroORM + SQS) no mesmo processo, numa porta aleatória. */
 export async function startTestApp(queues: TestQueues, overrides: Record<string, string> = {}): Promise<TestApp> {
   const app = await createApp(testConfig(queues, overrides), { shutdownHooks: false });
   await app.listen(0, '127.0.0.1');
@@ -41,19 +40,13 @@ export interface SpawnedInstance {
   name: string;
   api: ApiClient;
   process: Subprocess;
-  /** SIGTERM (graceful) — espera o processo sair. */
   stop: () => Promise<number>;
-  /** SIGKILL — morte abrupta, sem drenar nada. */
   kill: () => Promise<number>;
   exited: Promise<number>;
 }
 
 let nextPort = 39_000 + Math.floor(Math.random() * 1_000);
 
-/**
- * Sobe uma instância REAL em um processo separado (`bun run src/main.ts`), como no deploy.
- * Usado nos testes de múltiplas instâncias, crash e reinício.
- */
 export async function spawnInstance(
   name: string,
   queues: TestQueues,

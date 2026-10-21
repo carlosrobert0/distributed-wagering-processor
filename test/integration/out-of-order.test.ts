@@ -2,19 +2,20 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { ExponentialBackoff } from '../../src/domain/shared/exponential-backoff';
 import { prepareTestDatabase, sleep } from '../support/environment';
-import { expectWalletMatchesLedger, ledgerRows, outboxEventTypes, transactionRows, walletRow } from '../support/database';
+import {
+  expectWalletMatchesLedger,
+  ledgerRows,
+  outboxEventTypes,
+  transactionRows,
+  walletRow,
+} from '../support/database';
 import { buildUseCases } from '../support/use-cases';
 
-/**
- * §7 regras de reversão e §7.1 referências fora de ordem (§13 concorrência, cenário 7),
- * com Postgres real e o worker de PENDING_REFERENCE real (backoff encurtado para o teste).
- */
 describe('reversões e referências fora de ordem', () => {
   let ctx: Awaited<ReturnType<typeof buildUseCases>>;
 
   beforeAll(async () => {
     await prepareTestDatabase();
-    // 3 verificações com 50ms·2ⁿ: o teste não precisa esperar minutos.
     ctx = await buildUseCases({ referencePolicy: new ExponentialBackoff(50, 200, 3) });
   });
   afterAll(() => ctx.close());
@@ -50,7 +51,6 @@ describe('reversões e referências fora de ordem', () => {
     );
   }
 
-  /** Roda o worker até não haver mais nada devido (ou estourar o tempo). */
   async function drainPendingReferences(maxRounds = 20): Promise<void> {
     for (let round = 0; round < maxRounds; round++) {
       await sleep(250);
@@ -58,7 +58,9 @@ describe('reversões e referências fora de ordem', () => {
       if (result.candidates === 0) {
         const pending = await ctx.orm.em
           .fork()
-          .execute<{ c: number }[]>(`SELECT COUNT(*)::int AS c FROM wager_transactions WHERE status = 'PENDING_REFERENCE'`);
+          .execute<{ c: number }[]>(
+            `SELECT COUNT(*)::int AS c FROM wager_transactions WHERE status = 'PENDING_REFERENCE'`,
+          );
         if (Number(pending[0]?.c ?? 0) === 0) return;
       }
     }
@@ -76,7 +78,10 @@ describe('reversões e referências fora de ordem', () => {
 
     await drainPendingReferences();
     const rows = await transactionRows(wallet.id);
-    expect(rows.find((row) => row.id === refund.transactionId)).toMatchObject({ status: 'PROCESSED', balance_after: '100.00' });
+    expect(rows.find((row) => row.id === refund.transactionId)).toMatchObject({
+      status: 'PROCESSED',
+      balance_after: '100.00',
+    });
     expect((await walletRow(wallet.id)).balance).toBe('100.00');
     await expectWalletMatchesLedger(wallet.id);
   });
@@ -155,7 +160,11 @@ describe('reversões e referências fora de ordem', () => {
       await submit(wallet, 'WIN', '50.00', { externalTransactionId: winId });
       await submit(wallet, 'BET', '45.00');
       const rollback = await submit(wallet, 'ROLLBACK', '50.00', { reference: winId });
-      expect(rollback).toMatchObject({ status: 'REJECTED', failureCode: 'REVERSAL_WOULD_OVERDRAW', balance: { amount: '5.00' } });
+      expect(rollback).toMatchObject({
+        status: 'REJECTED',
+        failureCode: 'REVERSAL_WOULD_OVERDRAW',
+        balance: { amount: '5.00' },
+      });
       expect(await outboxEventTypes([rollback.transactionId])).toEqual(['WagerTransactionRejected']);
       await expectWalletMatchesLedger(wallet.id);
     });
@@ -164,7 +173,9 @@ describe('reversões e referências fora de ordem', () => {
       const wallet = await newWallet('100.00');
       const betId = `bet-${randomUUID()}`;
       await submit(wallet, 'BET', '20.00', { externalTransactionId: betId });
-      expect(await submit(wallet, 'REFUND', '19.99', { reference: betId })).toMatchObject({ failureCode: 'AMOUNT_MISMATCH' });
+      expect(await submit(wallet, 'REFUND', '19.99', { reference: betId })).toMatchObject({
+        failureCode: 'AMOUNT_MISMATCH',
+      });
       expect(await submit(wallet, 'REFUND', '20.00', { reference: betId, roundId: 'other' })).toMatchObject({
         failureCode: 'REFERENCE_MISMATCH',
       });

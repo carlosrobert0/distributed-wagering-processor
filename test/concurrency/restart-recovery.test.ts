@@ -6,14 +6,6 @@ import { countRows, expectAllWalletsMatchLedger, expectWalletMatchesLedger, wall
 import { WagerBody, wager } from '../support/http';
 import { approximateCounts, createTestQueues, sendWagerMessage } from '../support/sqs';
 
-/**
- * §13 concorrência 8: reinício do serviço com comprovação da consistência final.
- *
- * A instância A recebe carga por HTTP e SQS e é morta com SIGKILL no meio (sem drenar nada).
- * A instância B sobe, os provedores reenviam o que não teve resposta, a fila reentrega o que
- * estava em voo e o relay publica a outbox pendente. Ao final: cada operação aplicada uma vez,
- * saldo == ledger e nenhum evento confirmado perdido.
- */
 describe('reinício com consistência final', () => {
   let queues: Awaited<ReturnType<typeof createTestQueues>>;
 
@@ -36,7 +28,6 @@ describe('reinício com consistência final', () => {
 
     const wallets = await Promise.all(Array.from({ length: 5 }, () => instanceA.api.createWallet('100.00')));
 
-    // Carga SQS: 10 apostas de 1.00 por wallet.
     for (const wallet of wallets) {
       for (let n = 0; n < 10; n++) {
         const externalTransactionId = `sqs-${randomUUID()}`;
@@ -54,21 +45,17 @@ describe('reinício com consistência final', () => {
       }
     }
 
-    // Carga HTTP: 5 apostas de 1.00 por wallet, disparadas sem esperar.
     const httpBets: WagerBody[] = wallets.flatMap((wallet) =>
       Array.from({ length: 5 }, () => wager(wallet, { amount: '1.00' })),
     );
     const inFlight = Promise.allSettled(httpBets.map((bet) => instanceA.api.submit(bet)));
 
-    // Morte abrupta no meio do processamento.
     await sleep(300);
     await instanceA.kill();
     await inFlight;
 
-    // Nova instância assume.
     const instanceB = await spawnInstance('instance-b', queues, workerEnv);
     try {
-      // O provedor reenvia as requisições HTTP (sem saber quais commitaram) — mesmas keys.
       const retried = await Promise.all(httpBets.map((bet) => instanceB.api.submit(bet)));
       expect(retried.every((response) => response.status === 200 || response.status === 201)).toBe(true);
 
@@ -89,12 +76,10 @@ describe('reinício com consistência final', () => {
       );
 
       for (const wallet of wallets) {
-        // 100 − 10 (SQS) − 5 (HTTP) = 85.00: cada operação exatamente uma vez.
         expect(await walletRow(wallet.id)).toMatchObject({ balance: '85.00', version: 16 });
         await expectWalletMatchesLedger(wallet.id);
       }
 
-      // Nenhum evento confirmado perdido: toda transação processada tem seu WagerTransactionProcessed.
       const missingEvents = await countRows(
         `SELECT COUNT(*) FROM wager_transactions t
           WHERE t.wallet_id = ANY($1) AND t.status = 'PROCESSED'

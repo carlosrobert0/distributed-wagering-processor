@@ -6,7 +6,6 @@ import { db, expectWalletMatchesLedger, ledgerRows, walletRow } from '../support
 import { wager } from '../support/http';
 import { createTestQueues } from '../support/sqs';
 
-/** Contrato HTTP (§9) contra a aplicação real: Nest + Postgres + LocalStack. */
 describe('API HTTP', () => {
   let ctx: TestApp;
   let cleanupQueues: () => Promise<void>;
@@ -49,7 +48,6 @@ describe('API HTTP', () => {
       expect(duplicate.status).toBe(409);
       expect(duplicate.body).toMatchObject({ error: 'WALLET_ALREADY_EXISTS' });
 
-      // Outra moeda é outra wallet.
       expect((await ctx.api.createWallet('5.00', { playerId, currency: 'USD' })).balance.amount).toBe('5.00');
     });
 
@@ -80,10 +78,8 @@ describe('API HTTP', () => {
         idempotentReplay: false,
       });
 
-      // O saldo muda depois...
       await ctx.api.submit(wager(wallet, { amount: '100.00' }));
 
-      // ...mas o replay devolve o saldo observado NAQUELE momento.
       const replay = await ctx.api.submit(body);
       expect(replay.status).toBe(200);
       expect(replay.body).toEqual({ ...first.body, idempotentReplay: true });
@@ -133,8 +129,11 @@ describe('API HTTP', () => {
     });
 
     test('JSON malformado → 400', async () => {
-      const response = await ctx.api.request('POST', '/wagering/transactions', '{"broken":', { 'idempotency-key': 'k' });
+      const response = await ctx.api.request('POST', '/wagering/transactions', '{"broken":', {
+        'idempotency-key': 'k',
+      });
       expect(response.status).toBe(400);
+      expect(response.body).toEqual({ error: 'INVALID_PAYLOAD', message: 'Malformed JSON body' });
     });
 
     test('rejeição de negócio → 422 com failureCode; replay → 422 idêntico (AC-TX-13)', async () => {
@@ -204,7 +203,11 @@ describe('API HTTP', () => {
 
       const byId = await ctx.api.request('GET', `/wagering/transactions/${submitted.body.transactionId}`);
       expect(byId.status).toBe(200);
-      expect(byId.body).toMatchObject({ transactionId: submitted.body.transactionId, status: 'PROCESSED', kind: 'BET' });
+      expect(byId.body).toMatchObject({
+        transactionId: submitted.body.transactionId,
+        status: 'PROCESSED',
+        kind: 'BET',
+      });
 
       const byExternal = await ctx.api.request(
         'GET',
@@ -262,7 +265,6 @@ describe('API HTTP', () => {
 
     test('divergência é sinalizada, contada em métrica e NÃO corrigida', async () => {
       const wallet = await ctx.api.createWallet('100.00');
-      // Simula corrupção por fora da aplicação, desligando as proteções do schema (superusuário).
       const client = await db.connect();
       try {
         await client.query('BEGIN');
@@ -282,7 +284,7 @@ describe('API HTTP', () => {
         difference: { amount: '1.00' },
         issues: expect.arrayContaining(['STORED_BALANCE_DIFFERS_FROM_LEDGER']),
       });
-      expect((await walletRow(wallet.id)).balance).toBe('101.00'); // não corrigiu
+      expect((await walletRow(wallet.id)).balance).toBe('101.00');
 
       const metrics = await fetch(`${ctx.api.baseUrl}/metrics`).then((r) => r.text());
       expect(metrics).toMatch(/wagering_reconciliations_total\{[^}]*result="mismatch"[^}]*\} [1-9]/);

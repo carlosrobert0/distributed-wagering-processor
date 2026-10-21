@@ -13,10 +13,6 @@ import { MikroOrmUnitOfWork } from '../../src/infrastructure/persistence/mikro-o
 import { SystemClock, UuidV7Generator } from '../../src/infrastructure/system/system-adapters';
 import { TEST_DATABASE_URL } from './environment';
 
-/**
- * Monta os use cases reais sobre um MikroORM real (pool próprio), sem HTTP. Cada chamada cria
- * um ORM independente — útil para simular "outra instância" com conexões próprias.
- */
 export async function buildUseCases(
   options: { lockTimeoutMs?: number; referencePolicy?: ExponentialBackoff; poolMax?: number } = {},
 ) {
@@ -48,10 +44,6 @@ export async function buildUseCases(
   };
 }
 
-/**
- * UnitOfWork que injeta uma falha DEPOIS que todas as escritas da transação aconteceram
- * (logo após gravar a outbox), para provar que tudo ou nada é commitado.
- */
 export class FailAfterOutboxUnitOfWork implements UnitOfWork {
   constructor(private readonly inner: UnitOfWork) {}
 

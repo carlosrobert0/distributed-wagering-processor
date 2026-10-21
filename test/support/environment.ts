@@ -3,12 +3,6 @@ import { Client } from 'pg';
 import { AppConfig, loadConfig } from '../../src/infrastructure/config/app-config';
 import { createOrm } from '../../src/infrastructure/persistence/mikro-orm.config';
 
-/**
- * Ambiente dos testes de integração/concorrência: Postgres e LocalStack REAIS (docker compose).
- * Nada de mock de banco ou fila (eliminatória do §14).
- *
- *   docker compose up -d postgres localstack && bun test
- */
 export const POSTGRES_ADMIN_URL =
   process.env.TEST_POSTGRES_ADMIN_URL ?? 'postgres://wagering:wagering@localhost:5432/postgres';
 export const TEST_DATABASE_NAME = process.env.TEST_DATABASE_NAME ?? 'wagering_test';
@@ -23,11 +17,6 @@ export function withDatabase(url: string, database: string): string {
 
 let prepared: Promise<void> | undefined;
 
-/**
- * Recria o banco de teste do zero e aplica as migrations — uma vez por processo de teste
- * (o `bun test` roda todos os arquivos no mesmo processo). Cada teste usa wallets/ids próprios,
- * então não há limpeza entre testes (e nem poderia: o ledger é append-only por trigger).
- */
 export function prepareTestDatabase(): Promise<void> {
   prepared ??= (async () => {
     await recreateDatabase(TEST_DATABASE_NAME);
@@ -58,7 +47,6 @@ export interface TestQueues {
   events: string;
 }
 
-/** Variáveis de ambiente da aplicação apontando para o banco/filas de teste. Workers desligados por padrão. */
 export function testEnv(queues: TestQueues, overrides: Record<string, string> = {}): Record<string, string> {
   return {
     DATABASE_URL: TEST_DATABASE_URL,

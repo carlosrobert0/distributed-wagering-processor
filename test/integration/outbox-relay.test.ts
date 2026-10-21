@@ -16,10 +16,6 @@ import { countRows, db } from '../support/database';
 import { createTestQueues, drainMessages } from '../support/sqs';
 import { buildUseCases } from '../support/use-cases';
 
-/**
- * §11 Transactional Outbox com SQS real: publishers concorrentes, morte entre commit e
- * publicação, falha de publicação com retry, e duplicata segura.
- */
 describe('outbox relay', () => {
   let queues: Awaited<ReturnType<typeof createTestQueues>>;
   let instanceA: Awaited<ReturnType<typeof buildUseCases>>;
@@ -33,7 +29,6 @@ describe('outbox relay', () => {
   beforeAll(async () => {
     await prepareTestDatabase();
     queues = await createTestQueues();
-    // Duas "instâncias": ORMs e pools de conexão independentes.
     instanceA = await buildUseCases();
     instanceB = await buildUseCases();
   });
@@ -44,11 +39,19 @@ describe('outbox relay', () => {
     await queues.cleanup();
   });
 
-  function relay(instance: typeof instanceA, publisher: EventPublisher = new SqsEventPublisher(sqsQueues, queues.events)) {
-    return new PublishOutboxUseCase(instance.uow, publisher, clock, new PrometheusMetrics({ collectDefaults: false }), logger);
+  function relay(
+    instance: typeof instanceA,
+    publisher: EventPublisher = new SqsEventPublisher(sqsQueues, queues.events),
+  ) {
+    return new PublishOutboxUseCase(
+      instance.uow,
+      publisher,
+      clock,
+      new PrometheusMetrics({ collectDefaults: false }),
+      logger,
+    );
   }
 
-  /** Gera transações (e portanto eventos na outbox) sem nenhum relay rodando. */
   async function produceEvents(wallets: number, betsPerWallet: number): Promise<string[]> {
     const walletIds: string[] = [];
     for (let w = 0; w < wallets; w++) {
@@ -79,26 +82,29 @@ describe('outbox relay', () => {
   }
 
   async function pendingFor(walletIds: string[]): Promise<number> {
-    return countRows(`SELECT COUNT(*) FROM outbox_messages WHERE partition_key = ANY($1) AND published_at IS NULL`, [walletIds]);
+    return countRows(`SELECT COUNT(*) FROM outbox_messages WHERE partition_key = ANY($1) AND published_at IS NULL`, [
+      walletIds,
+    ]);
   }
 
   test('commit → "processo morre" antes de publicar → outra instância publica tudo (AC-OUT-03)', async () => {
     const walletIds = await produceEvents(2, 2);
-    // Nenhum relay rodou: o processo "morreu" depois do commit. Os eventos estão seguros na tabela.
     const pending = await pendingFor(walletIds);
-    expect(pending).toBe(2 * (2 + 2 * 2)); // por wallet: abertura (2 eventos) + 2 BETs × 2 eventos
+    expect(pending).toBe(2 * (2 + 2 * 2));
 
-    // Outra instância assume.
     let published = 0;
-    // Eventos mais antigos (de outros arquivos de teste) saem antes — a ordem é por occurred_at.
     for (let i = 0; i < 200 && (await pendingFor(walletIds)) > 0; i++) {
       published += (await relay(instanceB).publishBatch(100)).published;
     }
     expect(await pendingFor(walletIds)).toBe(0);
     expect(published).toBeGreaterThanOrEqual(pending);
 
-    const delivered = (await drainMessages(queues.events)).map((m) => JSON.parse(m.Body!) as { eventId: string; eventType: string });
-    const ours = delivered.filter((event) => walletIds.includes((event as { data?: { walletId?: string } }).data?.walletId ?? ''));
+    const delivered = (await drainMessages(queues.events)).map(
+      (m) => JSON.parse(m.Body!) as { eventId: string; eventType: string },
+    );
+    const ours = delivered.filter((event) =>
+      walletIds.includes((event as { data?: { walletId?: string } }).data?.walletId ?? ''),
+    );
     expect(new Set(ours.map((event) => event.eventId)).size).toBe(ours.length);
     expect(ours.length).toBe(pending);
   });
@@ -116,7 +122,6 @@ describe('outbox relay', () => {
     });
     const sqsPublisher = new SqsEventPublisher(sqsQueues, queues.events);
 
-    // Os dois relays rodam em paralelo, com lotes pequenos para forçar disputa pelas linhas.
     const runRelay = async (instance: typeof instanceA) => {
       const useCase = relay(instance, recording(sqsPublisher));
       for (let i = 0; i < 500; i++) {
@@ -127,10 +132,11 @@ describe('outbox relay', () => {
     await Promise.all([runRelay(instanceA), runRelay(instanceB)]);
 
     expect(await pendingFor(walletIds)).toBe(0);
-    const ours = await db.query<{ id: string }>(`SELECT id FROM outbox_messages WHERE partition_key = ANY($1)`, [walletIds]);
+    const ours = await db.query<{ id: string }>(`SELECT id FROM outbox_messages WHERE partition_key = ANY($1)`, [
+      walletIds,
+    ]);
     const ourIds = new Set(ours.rows.map((row) => row.id));
     const publishedOurs = published.filter((id) => ourIds.has(id));
-    // SKIP LOCKED: nenhum evento foi publicado duas vezes pelos dois relays.
     expect(publishedOurs.length).toBe(expected);
     expect(new Set(publishedOurs).size).toBe(expected);
     await drainMessages(queues.events);
@@ -159,13 +165,20 @@ describe('outbox relay', () => {
       [walletIds],
     );
     expect(rows.length).toBeGreaterThan(0);
-    expect(rows.every((row) => row.attempts >= 1 && row.last_error === 'SQS unavailable' && row.due_in_future)).toBe(true);
+    expect(rows.every((row) => row.attempts >= 1 && row.last_error === 'SQS unavailable' && row.due_in_future)).toBe(
+      true,
+    );
 
-    // Força o vencimento e publica de novo.
-    await db.query(`UPDATE outbox_messages SET next_attempt_at = now() WHERE partition_key = ANY($1) AND published_at IS NULL`, [walletIds]);
+    await db.query(
+      `UPDATE outbox_messages SET next_attempt_at = now() WHERE partition_key = ANY($1) AND published_at IS NULL`,
+      [walletIds],
+    );
     for (let i = 0; i < 5 && (await pendingFor(walletIds)) > 0; i++) {
       await useCase.publishBatch(50);
-      await db.query(`UPDATE outbox_messages SET next_attempt_at = now() WHERE partition_key = ANY($1) AND published_at IS NULL`, [walletIds]);
+      await db.query(
+        `UPDATE outbox_messages SET next_attempt_at = now() WHERE partition_key = ANY($1) AND published_at IS NULL`,
+        [walletIds],
+      );
     }
     expect(await pendingFor(walletIds)).toBe(0);
     await drainMessages(queues.events);
@@ -178,7 +191,6 @@ describe('outbox relay', () => {
         throw Object.assign(new Error('process killed mid-batch'), { fatal: true });
       },
     };
-    // Simula a morte: o callback lança DENTRO da transação de claim → rollback, locks liberados.
     await expect(
       instanceA.uow.run(async (scope) => {
         const claimed = await scope.outbox.claimDue(new Date(), 50);
@@ -187,7 +199,6 @@ describe('outbox relay', () => {
       }),
     ).rejects.toThrow('process killed');
 
-    // Linhas continuam pendentes, sem tentativa contabilizada, e outra instância publica.
     expect(await pendingFor(walletIds)).toBeGreaterThan(0);
     for (let i = 0; i < 5 && (await pendingFor(walletIds)) > 0; i++) {
       await relay(instanceB).publishBatch(50);
@@ -198,17 +209,16 @@ describe('outbox relay', () => {
 
   test('publicação duplicada é segura: mesmo eventId, deduplicado pela fila FIFO (AC-OUT-04)', async () => {
     const walletIds = await produceEvents(1, 0);
-    const { rows } = await db.query<{ id: string }>(
-      `SELECT id FROM outbox_messages WHERE partition_key = $1 LIMIT 1`,
-      [walletIds[0]],
-    );
+    const { rows } = await db.query<{ id: string }>(`SELECT id FROM outbox_messages WHERE partition_key = $1 LIMIT 1`, [
+      walletIds[0],
+    ]);
     const stored = await instanceA.orm.em.fork().findOne(OutboxMessageRecord, { id: rows[0]!.id });
     expect(stored).not.toBeNull();
     const record = OutboxMessageMapper.toDomain(stored!);
 
     const publisher = new SqsEventPublisher(sqsQueues, queues.events);
     await publisher.publish(record);
-    await publisher.publish(record); // "republicação" após crash
+    await publisher.publish(record);
 
     const delivered = (await drainMessages(queues.events)).filter(
       (message) => (JSON.parse(message.Body!) as { eventId: string }).eventId === record.id,

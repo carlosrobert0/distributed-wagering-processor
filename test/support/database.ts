@@ -2,10 +2,6 @@ import { expect } from 'bun:test';
 import { Pool, PoolClient } from 'pg';
 import { TEST_DATABASE_URL } from './environment';
 
-/**
- * Conexão direta ao banco de teste para ASSERÇÕES (fora da aplicação). Valores monetários são
- * lidos como texto (NUMERIC chega como string no driver) e comparados como string.
- */
 export const db = new Pool({ connectionString: TEST_DATABASE_URL, max: 10 });
 
 export interface WalletRow {
@@ -34,7 +30,9 @@ export interface TransactionRow {
 }
 
 export async function walletRow(walletId: string): Promise<WalletRow> {
-  const { rows } = await db.query<WalletRow>('SELECT id, balance::text, version FROM wallets WHERE id = $1', [walletId]);
+  const { rows } = await db.query<WalletRow>('SELECT id, balance::text, version FROM wallets WHERE id = $1', [
+    walletId,
+  ]);
   if (!rows[0]) throw new Error(`wallet ${walletId} not found`);
   return rows[0];
 }
@@ -70,10 +68,6 @@ export async function countRows(sql: string, params: unknown[] = []): Promise<nu
   return Number(rows[0]?.count ?? 0);
 }
 
-/**
- * INVARIANTE FINAL de todos os testes (§13):  wallet.balance == saldo reconstruído pelo ledger.
- * Também confere o encadeamento e a versão — tudo calculado em NUMERIC no banco.
- */
 export async function expectWalletMatchesLedger(walletId: string): Promise<void> {
   const { rows } = await db.query<{
     balance: string;
@@ -103,7 +97,6 @@ export async function expectWalletMatchesLedger(walletId: string): Promise<void>
   }
 }
 
-/** A mesma invariante para TODAS as wallets do banco de teste. */
 export async function expectAllWalletsMatchLedger(): Promise<void> {
   const { rows } = await db.query<{ id: string; balance: string; rebuilt: string }>(
     `SELECT w.id, w.balance::text AS balance,
@@ -115,7 +108,6 @@ export async function expectAllWalletsMatchLedger(): Promise<void> {
   expect(rows).toEqual([]);
 }
 
-/** Executa `fn` numa transação manual (usado para segurar locks e testar constraints). */
 export async function inTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await db.connect();
   try {

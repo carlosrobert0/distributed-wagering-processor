@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { canonicalJson, computeWagerPayloadHash, WagerBusinessFields } from '../../../src/application/wagering/payload-hash';
+import {
+  canonicalJson,
+  computeWagerPayloadHash,
+  WagerBusinessFields,
+} from '../../../src/application/wagering/payload-hash';
 import { LedgerCursor } from '../../../src/application/wallets/ledger-cursor';
 import { InvalidPayloadError } from '../../../src/application/errors';
 
@@ -48,7 +52,12 @@ describe('payloadHash (AC-IDEM-02)', () => {
   });
 
   test('metadados de transporte não entram no hash', () => {
-    const withTransport = { ...fields, idempotencyKey: 'other', messageId: 'm-1', occurredAt: 'now' } as WagerBusinessFields;
+    const withTransport = {
+      ...fields,
+      idempotencyKey: 'other',
+      messageId: 'm-1',
+      occurredAt: 'now',
+    } as WagerBusinessFields;
     expect(computeWagerPayloadHash(withTransport)).toBe(computeWagerPayloadHash(fields));
   });
 });
@@ -61,10 +70,11 @@ describe('LedgerCursor (AC-API-03)', () => {
     expect(LedgerCursor.decode(undefined)).toBeUndefined();
   });
 
-  test.each(['garbage', Buffer.from('{"v":2,"after":1}').toString('base64url'), Buffer.from('{"v":1,"after":-1}').toString('base64url')])(
-    'cursor inválido → InvalidPayloadError (%s)',
-    (cursor) => {
-      expect(() => LedgerCursor.decode(cursor)).toThrow(InvalidPayloadError);
-    },
-  );
+  test.each([
+    'garbage',
+    Buffer.from('{"v":2,"after":1}').toString('base64url'),
+    Buffer.from('{"v":1,"after":-1}').toString('base64url'),
+  ])('cursor inválido → InvalidPayloadError (%s)', (cursor) => {
+    expect(() => LedgerCursor.decode(cursor)).toThrow(InvalidPayloadError);
+  });
 });

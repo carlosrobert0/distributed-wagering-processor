@@ -2,14 +2,16 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { prepareTestDatabase, waitFor } from '../support/environment';
 import { spawnInstance, SpawnedInstance } from '../support/app';
-import { countRows, expectAllWalletsMatchLedger, expectWalletMatchesLedger, ledgerRows, walletRow } from '../support/database';
+import {
+  countRows,
+  expectAllWalletsMatchLedger,
+  expectWalletMatchesLedger,
+  ledgerRows,
+  walletRow,
+} from '../support/database';
 import { wager } from '../support/http';
 import { approximateCounts, createTestQueues, drainMessages, sendWagerMessage } from '../support/sqs';
 
-/**
- * §13 concorrência 4: ≥ 3 PROCESSOS simultâneos (`bun run src/main.ts`), cada um com seu pool
- * de conexões, consumer SQS, relay de outbox e worker de referências — exatamente como no deploy.
- */
 describe('3 instâncias simultâneas', () => {
   let queues: Awaited<ReturnType<typeof createTestQueues>>;
   let instances: SpawnedInstance[] = [];
@@ -59,7 +61,6 @@ describe('3 instâncias simultâneas', () => {
       bets.flatMap((bet, i) => [instance(i).api.submit(bet), instance(i + 1).api.submit(bet)]),
     );
 
-    // Cada par (original, duplicata) termina com o mesmo transactionId.
     for (let i = 0; i < bets.length; i++) {
       expect(responses[2 * i]!.body.transactionId).toBe(responses[2 * i + 1]!.body.transactionId);
     }
@@ -89,9 +90,9 @@ describe('3 instâncias simultâneas', () => {
           money: { amount: '1.00', currency: 'BRL' },
         };
         const messageId = `msg-${randomUUID()}`;
-        sends.push(sendWagerMessage(queues.wagerTransactions, data, { messageId })); // original
-        sends.push(sendWagerMessage(queues.wagerTransactions, data, { messageId })); // redelivery
-        sends.push(sendWagerMessage(queues.wagerTransactions, data)); // outro messageId, mesma key
+        sends.push(sendWagerMessage(queues.wagerTransactions, data, { messageId }));
+        sends.push(sendWagerMessage(queues.wagerTransactions, data, { messageId }));
+        sends.push(sendWagerMessage(queues.wagerTransactions, data));
       }
     }
     await Promise.all(sends);
@@ -115,16 +116,14 @@ describe('3 instâncias simultâneas', () => {
 
     await waitFor(
       async () =>
-        (await countRows(
-          `SELECT COUNT(*) FROM outbox_messages WHERE partition_key = $1 AND published_at IS NULL`,
-          [wallet.id],
-        )) === 0,
+        (await countRows(`SELECT COUNT(*) FROM outbox_messages WHERE partition_key = $1 AND published_at IS NULL`, [
+          wallet.id,
+        ])) === 0,
       { timeoutMs: 30_000, description: 'outbox drained' },
     );
     const events = (await drainMessages(queues.events))
       .map((m) => JSON.parse(m.Body!) as { eventId: string; data: { walletId?: string } })
       .filter((event) => event.data.walletId === wallet.id);
-    // abertura (2) + 10 BETs × 2 eventos
     expect(events).toHaveLength(22);
     expect(new Set(events.map((event) => event.eventId)).size).toBe(22);
   });

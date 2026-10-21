@@ -11,10 +11,6 @@ import {
 } from '../support/database';
 import { buildUseCases, FailAfterOutboxUnitOfWork } from '../support/use-cases';
 
-/**
- * AC-OUT-01 / §11: transação, saldo, ledger, inbox e outbox são confirmados JUNTOS ou não são.
- * Postgres real; a falha é injetada depois de todas as escritas e antes do commit.
- */
 describe('atomicidade wallet + ledger + inbox + outbox', () => {
   let ctx: Awaited<ReturnType<typeof buildUseCases>>;
 
@@ -53,7 +49,13 @@ describe('atomicidade wallet + ledger + inbox + outbox', () => {
     expect(transactions).toHaveLength(1);
     expect(transactions[0]).toMatchObject({ kind: 'OPENING', status: 'PROCESSED', balance_after: '1000.00' });
     expect(await ledgerRows(wallet.id)).toEqual([
-      expect.objectContaining({ wallet_version: 1, direction: 'CREDIT', amount: '1000.00', balance_before: '0.00', balance_after: '1000.00' }),
+      expect.objectContaining({
+        wallet_version: 1,
+        direction: 'CREDIT',
+        amount: '1000.00',
+        balance_before: '0.00',
+        balance_after: '1000.00',
+      }),
     ]);
     expect(await outboxEventTypes([wallet.id, transactions[0]!.id])).toEqual(
       expect.arrayContaining(['WagerTransactionProcessed', 'WalletBalanceChanged']),
@@ -71,7 +73,11 @@ describe('atomicidade wallet + ledger + inbox + outbox', () => {
       inbox: { consumerName: 'test-consumer', messageId, payloadHash: 'a'.repeat(64) },
     });
 
-    expect(result).toMatchObject({ status: 'PROCESSED', balance: { amount: '75.00', currency: 'BRL' }, idempotentReplay: false });
+    expect(result).toMatchObject({
+      status: 'PROCESSED',
+      balance: { amount: '75.00', currency: 'BRL' },
+      idempotentReplay: false,
+    });
     expect((await walletRow(wallet.id)).balance).toBe('75.00');
     expect(await ledgerRows(wallet.id)).toHaveLength(2);
     expect(await countRows(`SELECT COUNT(*) FROM inbox_messages WHERE message_id = $1`, [messageId])).toBe(1);
@@ -96,12 +102,20 @@ describe('atomicidade wallet + ledger + inbox + outbox', () => {
     ).rejects.toThrow('simulated crash');
 
     expect(await walletRow(wallet.id)).toMatchObject({ balance: '100.00', version: 1 });
-    expect(await ledgerRows(wallet.id)).toHaveLength(1); // só a abertura
-    expect(await countRows(`SELECT COUNT(*) FROM wager_transactions WHERE external_transaction_id = $1`, [command.externalTransactionId])).toBe(0);
+    expect(await ledgerRows(wallet.id)).toHaveLength(1);
+    expect(
+      await countRows(`SELECT COUNT(*) FROM wager_transactions WHERE external_transaction_id = $1`, [
+        command.externalTransactionId,
+      ]),
+    ).toBe(0);
     expect(await countRows(`SELECT COUNT(*) FROM inbox_messages WHERE message_id = $1`, [messageId])).toBe(0);
-    expect(await countRows(`SELECT COUNT(*) FROM outbox_messages WHERE partition_key = $1 AND event_type = 'WalletBalanceChanged' AND payload->'data'->>'walletVersion' = '2'`, [wallet.id])).toBe(0);
+    expect(
+      await countRows(
+        `SELECT COUNT(*) FROM outbox_messages WHERE partition_key = $1 AND event_type = 'WalletBalanceChanged' AND payload->'data'->>'walletVersion' = '2'`,
+        [wallet.id],
+      ),
+    ).toBe(0);
 
-    // A mesma mensagem, reprocessada sem falha, aplica exatamente uma vez.
     const retried = await ctx.processWager().execute(command, {
       correlationId: 'c-2',
       source: 'sqs',
@@ -116,7 +130,11 @@ describe('atomicidade wallet + ledger + inbox + outbox', () => {
     const wallet = await newWallet('10.00');
     const result = await ctx.processWager().execute(betCommand(wallet), { correlationId: 'c-3', source: 'http' });
 
-    expect(result).toMatchObject({ status: 'REJECTED', failureCode: 'INSUFFICIENT_FUNDS', balance: { amount: '10.00' } });
+    expect(result).toMatchObject({
+      status: 'REJECTED',
+      failureCode: 'INSUFFICIENT_FUNDS',
+      balance: { amount: '10.00' },
+    });
     expect(await walletRow(wallet.id)).toMatchObject({ balance: '10.00', version: 1 });
     expect(await ledgerRows(wallet.id)).toHaveLength(1);
     expect(await outboxEventTypes([result.transactionId])).toEqual(['WagerTransactionRejected']);

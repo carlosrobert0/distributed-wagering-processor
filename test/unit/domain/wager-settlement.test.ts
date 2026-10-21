@@ -33,7 +33,6 @@ function found(transaction: WagerTransaction, alreadyReversed = false): Referenc
   return { found: true, transaction, alreadyReversed };
 }
 
-/** Cria e aplica uma transação, retornando-a já PROCESSED. */
 function applied(wallet: Wallet, overrides: TxOverrides = {}, reference?: WagerTransaction): WagerTransaction {
   const tx = newTransaction(wallet, overrides);
   const outcome = settle(wallet, tx, reference ? found(reference) : undefined);
@@ -184,7 +183,7 @@ describe('settleWagerTransaction — regras de negócio (§7)', () => {
     test('referência REJECTED → REFERENCE_NOT_PROCESSED', () => {
       const wallet = openWallet('10.00');
       const bet = newTransaction(wallet, { externalTransactionId: 'bet-1', money: brl('40.00') });
-      settle(wallet, bet); // rejeitada por saldo insuficiente
+      settle(wallet, bet);
       const refund = newTransaction(wallet, {
         kind: WagerTransactionKind.Refund,
         referenceExternalTransactionId: 'bet-1',
@@ -213,7 +212,11 @@ describe('settleWagerTransaction — regras de negócio (§7)', () => {
 
     test('de WIN debita (inverso)', () => {
       const wallet = openWallet('0.00');
-      const win = applied(wallet, { kind: WagerTransactionKind.Win, externalTransactionId: 'win-1', money: brl('50.00') });
+      const win = applied(wallet, {
+        kind: WagerTransactionKind.Win,
+        externalTransactionId: 'win-1',
+        money: brl('50.00'),
+      });
       const rollback = newTransaction(wallet, {
         kind: WagerTransactionKind.Rollback,
         referenceExternalTransactionId: 'win-1',
@@ -226,8 +229,12 @@ describe('settleWagerTransaction — regras de negócio (§7)', () => {
 
     test('de WIN cujo crédito já foi gasto → REVERSAL_WOULD_OVERDRAW, distinto de INSUFFICIENT_FUNDS (AC-TX-12)', () => {
       const wallet = openWallet('0.00');
-      const win = applied(wallet, { kind: WagerTransactionKind.Win, externalTransactionId: 'win-1', money: brl('50.00') });
-      applied(wallet, { money: brl('45.00') }); // jogador gastou o prêmio
+      const win = applied(wallet, {
+        kind: WagerTransactionKind.Win,
+        externalTransactionId: 'win-1',
+        money: brl('50.00'),
+      });
+      applied(wallet, { money: brl('45.00') });
       const rollback = newTransaction(wallet, {
         kind: WagerTransactionKind.Rollback,
         referenceExternalTransactionId: 'win-1',
@@ -266,7 +273,11 @@ describe('settleWagerTransaction — regras de negócio (§7)', () => {
 
     test('de LOSS → INVALID_REFERENCE_KIND', () => {
       const wallet = openWallet('100.00');
-      const loss = applied(wallet, { kind: WagerTransactionKind.Loss, externalTransactionId: 'loss-1', money: brl('5.00') });
+      const loss = applied(wallet, {
+        kind: WagerTransactionKind.Loss,
+        externalTransactionId: 'loss-1',
+        money: brl('5.00'),
+      });
       const rollback = newTransaction(wallet, {
         kind: WagerTransactionKind.Rollback,
         referenceExternalTransactionId: 'loss-1',
@@ -284,7 +295,10 @@ describe('settleWagerTransaction — regras de negócio (§7)', () => {
 
     test('referência ausente → PENDING_REFERENCE, sem tocar no saldo', () => {
       const wallet = openWallet('100.00');
-      const refund = newTransaction(wallet, { kind: WagerTransactionKind.Refund, referenceExternalTransactionId: 'bet-x' });
+      const refund = newTransaction(wallet, {
+        kind: WagerTransactionKind.Refund,
+        referenceExternalTransactionId: 'bet-x',
+      });
       expect(settle(wallet, refund, missing)).toEqual({ type: 'pending-reference', firstTime: true });
       expect(refund.status).toBe(WagerTransactionStatus.PendingReference);
       expect(refund.nextReferenceCheckAt).toEqual(new Date(NOW.getTime() + 2_000));
@@ -293,14 +307,16 @@ describe('settleWagerTransaction — regras de negócio (§7)', () => {
 
     test('backoff exponencial e REFERENCE_NOT_FOUND ao esgotar o limite', () => {
       const wallet = openWallet('100.00');
-      const refund = newTransaction(wallet, { kind: WagerTransactionKind.Refund, referenceExternalTransactionId: 'bet-x' });
+      const refund = newTransaction(wallet, {
+        kind: WagerTransactionKind.Refund,
+        referenceExternalTransactionId: 'bet-x',
+      });
       settle(wallet, refund, missing);
 
       expect(settle(wallet, refund, missing)).toEqual({ type: 'pending-reference', firstTime: false });
       expect(refund.nextReferenceCheckAt).toEqual(new Date(NOW.getTime() + 4_000));
       expect(settle(wallet, refund, missing)).toEqual({ type: 'pending-reference', firstTime: false });
       expect(refund.nextReferenceCheckAt).toEqual(new Date(NOW.getTime() + 8_000));
-      // 3ª verificação esgota a política (maxAttempts = 3).
       expect(settle(wallet, refund, missing)).toEqual({
         type: 'rejected',
         failureCode: FailureCode.ReferenceNotFound,

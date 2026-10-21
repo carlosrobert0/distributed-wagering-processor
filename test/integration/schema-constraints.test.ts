@@ -4,18 +4,12 @@ import { PoolClient } from 'pg';
 import { prepareTestDatabase } from '../support/environment';
 import { db, inTransaction } from '../support/database';
 
-/**
- * As garantias do §6 aplicadas NO SCHEMA (restrição 9): cada teste tenta violar uma invariante
- * com SQL cru — como faria um bug ou um operador — e o banco precisa recusar.
- */
-
 interface Seed {
   walletId: string;
   playerId: string;
   betId: string;
 }
 
-/** Wallet com 100.00 (OPENING + lançamento) e uma BET de 30.00 processada — tudo via SQL. */
 async function seedWallet(): Promise<Seed> {
   const walletId = randomUUID();
   const playerId = randomUUID();
@@ -27,10 +21,34 @@ async function seedWallet(): Promise<Seed> {
        VALUES ($1, $2, 'BRL', 70.00, 2, now(), now())`,
       [walletId, playerId],
     );
-    await insertTx(c, { id: openingId, walletId, playerId, kind: 'OPENING', amount: '100.00', providerId: 'internal', balanceAfter: '100.00' });
+    await insertTx(c, {
+      id: openingId,
+      walletId,
+      playerId,
+      kind: 'OPENING',
+      amount: '100.00',
+      providerId: 'internal',
+      balanceAfter: '100.00',
+    });
     await insertTx(c, { id: betId, walletId, playerId, kind: 'BET', amount: '30.00', balanceAfter: '70.00' });
-    await insertEntry(c, { walletId, transactionId: openingId, version: 1, direction: 'CREDIT', amount: '100.00', before: '0.00', after: '100.00' });
-    await insertEntry(c, { walletId, transactionId: betId, version: 2, direction: 'DEBIT', amount: '30.00', before: '100.00', after: '70.00' });
+    await insertEntry(c, {
+      walletId,
+      transactionId: openingId,
+      version: 1,
+      direction: 'CREDIT',
+      amount: '100.00',
+      before: '0.00',
+      after: '100.00',
+    });
+    await insertEntry(c, {
+      walletId,
+      transactionId: betId,
+      version: 2,
+      direction: 'DEBIT',
+      amount: '30.00',
+      before: '100.00',
+      after: '70.00',
+    });
   });
   return { walletId, playerId, betId };
 }
@@ -91,7 +109,17 @@ async function insertEntry(c: PoolClient, e: EntrySeed): Promise<void> {
     `INSERT INTO wallet_ledger_entries (id, wallet_id, transaction_id, wallet_version, direction, amount, currency,
        balance_before, balance_after, created_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())`,
-    [randomUUID(), e.walletId, e.transactionId, e.version, e.direction, e.amount, e.currency ?? 'BRL', e.before, e.after],
+    [
+      randomUUID(),
+      e.walletId,
+      e.transactionId,
+      e.version,
+      e.direction,
+      e.amount,
+      e.currency ?? 'BRL',
+      e.before,
+      e.after,
+    ],
   );
 }
 
@@ -170,31 +198,84 @@ describe('constraints do schema (§5 restrição 9)', () => {
     test('aritmética errada é recusada (CHECK balance_after = before ± amount)', async () => {
       await expectRejected(async (c) => {
         const txId = randomUUID();
-        await insertTx(c, { id: txId, walletId: seed.walletId, playerId: seed.playerId, kind: 'WIN', amount: '5.00', balanceAfter: '75.00' });
-        await insertEntry(c, { walletId: seed.walletId, transactionId: txId, version: 3, direction: 'CREDIT', amount: '5.00', before: '70.00', after: '76.00' });
+        await insertTx(c, {
+          id: txId,
+          walletId: seed.walletId,
+          playerId: seed.playerId,
+          kind: 'WIN',
+          amount: '5.00',
+          balanceAfter: '75.00',
+        });
+        await insertEntry(c, {
+          walletId: seed.walletId,
+          transactionId: txId,
+          version: 3,
+          direction: 'CREDIT',
+          amount: '5.00',
+          before: '70.00',
+          after: '76.00',
+        });
       }, /ledger_arithmetic_ck/);
     });
 
     test('encadeamento quebrado é recusado (before ≠ after anterior)', async () => {
       await expectRejected(async (c) => {
         const txId = randomUUID();
-        await insertTx(c, { id: txId, walletId: seed.walletId, playerId: seed.playerId, kind: 'WIN', amount: '5.00', balanceAfter: '55.00' });
-        await insertEntry(c, { walletId: seed.walletId, transactionId: txId, version: 3, direction: 'CREDIT', amount: '5.00', before: '50.00', after: '55.00' });
+        await insertTx(c, {
+          id: txId,
+          walletId: seed.walletId,
+          playerId: seed.playerId,
+          kind: 'WIN',
+          amount: '5.00',
+          balanceAfter: '55.00',
+        });
+        await insertEntry(c, {
+          walletId: seed.walletId,
+          transactionId: txId,
+          version: 3,
+          direction: 'CREDIT',
+          amount: '5.00',
+          before: '50.00',
+          after: '55.00',
+        });
       }, /ledger chain broken/);
     });
 
     test('mesma versão da wallet duas vezes é recusada (prova de ausência de lost update)', async () => {
       await expectRejected(async (c) => {
         const txId = randomUUID();
-        await insertTx(c, { id: txId, walletId: seed.walletId, playerId: seed.playerId, kind: 'BET', amount: '1.00', balanceAfter: '69.00' });
-        await insertEntry(c, { walletId: seed.walletId, transactionId: txId, version: 2, direction: 'DEBIT', amount: '1.00', before: '70.00', after: '69.00' });
+        await insertTx(c, {
+          id: txId,
+          walletId: seed.walletId,
+          playerId: seed.playerId,
+          kind: 'BET',
+          amount: '1.00',
+          balanceAfter: '69.00',
+        });
+        await insertEntry(c, {
+          walletId: seed.walletId,
+          transactionId: txId,
+          version: 2,
+          direction: 'DEBIT',
+          amount: '1.00',
+          before: '70.00',
+          after: '69.00',
+        });
       }, /ledger_wallet_version_uq|ledger chain broken/);
     });
 
     test('dois lançamentos para a mesma transação são recusados', async () => {
       await expectRejected(
         (c) =>
-          insertEntry(c, { walletId: seed.walletId, transactionId: seed.betId, version: 3, direction: 'DEBIT', amount: '30.00', before: '70.00', after: '40.00' }),
+          insertEntry(c, {
+            walletId: seed.walletId,
+            transactionId: seed.betId,
+            version: 3,
+            direction: 'DEBIT',
+            amount: '30.00',
+            before: '70.00',
+            after: '40.00',
+          }),
         /ledger_transaction_wallet_uq/,
       );
     });
@@ -202,8 +283,24 @@ describe('constraints do schema (§5 restrição 9)', () => {
     test('lançamento em moeda diferente da wallet é recusado (FK composta)', async () => {
       await expectRejected(async (c) => {
         const txId = randomUUID();
-        await insertTx(c, { id: txId, walletId: seed.walletId, playerId: seed.playerId, kind: 'WIN', amount: '5.00', balanceAfter: '75.00' });
-        await insertEntry(c, { walletId: seed.walletId, transactionId: txId, version: 3, direction: 'CREDIT', amount: '5.00', before: '70.00', after: '75.00', currency: 'USD' });
+        await insertTx(c, {
+          id: txId,
+          walletId: seed.walletId,
+          playerId: seed.playerId,
+          kind: 'WIN',
+          amount: '5.00',
+          balanceAfter: '75.00',
+        });
+        await insertEntry(c, {
+          walletId: seed.walletId,
+          transactionId: txId,
+          version: 3,
+          direction: 'CREDIT',
+          amount: '5.00',
+          before: '70.00',
+          after: '75.00',
+          currency: 'USD',
+        });
       }, /ledger_wallet_currency_fk|does not match transaction/);
     });
 
@@ -218,7 +315,15 @@ describe('constraints do schema (§5 restrição 9)', () => {
              'INSUFFICIENT_FUNDS', 70.00, now(), now(), now())`,
           [txId, `ext-${txId}`, seed.walletId, seed.playerId],
         );
-        await insertEntry(c, { walletId: seed.walletId, transactionId: txId, version: 3, direction: 'DEBIT', amount: '500.00', before: '70.00', after: '0.00' });
+        await insertEntry(c, {
+          walletId: seed.walletId,
+          transactionId: txId,
+          version: 3,
+          direction: 'DEBIT',
+          amount: '500.00',
+          before: '70.00',
+          after: '0.00',
+        });
       }, /only PROCESSED|ledger_arithmetic_ck/);
     });
   });
@@ -258,18 +363,39 @@ describe('constraints do schema (§5 restrição 9)', () => {
 
     test('REFUND sem referência é recusado (CHECK)', async () => {
       await expectRejected(
-        (c) => insertTx(c, { id: randomUUID(), walletId: seed.walletId, playerId: seed.playerId, kind: 'REFUND', amount: '1.00' }),
+        (c) =>
+          insertTx(c, {
+            id: randomUUID(),
+            walletId: seed.walletId,
+            playerId: seed.playerId,
+            kind: 'REFUND',
+            amount: '1.00',
+          }),
         /wager_tx_reversal_requires_reference_ck|wager_tx_reference_resolved_ck/,
       );
     });
 
     test('BET com valor zero é recusada; LOSS com zero é aceita', async () => {
       await expectRejected(
-        (c) => insertTx(c, { id: randomUUID(), walletId: seed.walletId, playerId: seed.playerId, kind: 'BET', amount: '0.00' }),
+        (c) =>
+          insertTx(c, {
+            id: randomUUID(),
+            walletId: seed.walletId,
+            playerId: seed.playerId,
+            kind: 'BET',
+            amount: '0.00',
+          }),
         /wager_tx_amount_ck/,
       );
       await inTransaction((c) =>
-        insertTx(c, { id: randomUUID(), walletId: seed.walletId, playerId: seed.playerId, kind: 'LOSS', amount: '0.00', balanceAfter: '70.00' }),
+        insertTx(c, {
+          id: randomUUID(),
+          walletId: seed.walletId,
+          playerId: seed.playerId,
+          kind: 'LOSS',
+          amount: '0.00',
+          balanceAfter: '70.00',
+        }),
       );
     });
 
@@ -292,19 +418,30 @@ describe('constraints do schema (§5 restrição 9)', () => {
 
     test('transação terminal não pode mudar de estado (trigger)', async () => {
       await expectRejected(
-        (c) => c.query(`UPDATE wager_transactions SET status = 'REJECTED', failure_code = 'X' WHERE id = $1`, [seed.betId]),
+        (c) =>
+          c.query(`UPDATE wager_transactions SET status = 'REJECTED', failure_code = 'X' WHERE id = $1`, [seed.betId]),
         /is terminal/,
       );
     });
 
     test('transação não pode ser apagada', async () => {
-      await expectRejected((c) => c.query(`DELETE FROM wager_transactions WHERE id = $1`, [seed.betId]), /cannot be deleted/);
+      await expectRejected(
+        (c) => c.query(`DELETE FROM wager_transactions WHERE id = $1`, [seed.betId]),
+        /cannot be deleted/,
+      );
     });
 
     test('REJECTED exige failure_code; PROCESSED não pode ter (CHECK)', async () => {
       await expectRejected(
         (c) =>
-          insertTx(c, { id: randomUUID(), walletId: seed.walletId, playerId: seed.playerId, kind: 'BET', amount: '1.00', status: 'REJECTED' }),
+          insertTx(c, {
+            id: randomUUID(),
+            walletId: seed.walletId,
+            playerId: seed.playerId,
+            kind: 'BET',
+            amount: '1.00',
+            status: 'REJECTED',
+          }),
         /wager_tx_failure_code_ck/,
       );
     });

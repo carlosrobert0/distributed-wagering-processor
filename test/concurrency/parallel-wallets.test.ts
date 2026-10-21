@@ -5,7 +5,6 @@ import { db, expectWalletMatchesLedger, walletRow } from '../support/database';
 import { wager } from '../support/http';
 import { createTestQueues } from '../support/sqs';
 
-/** §13 concorrência 3: wallets distintas processadas em paralelo (lock por linha, não global). */
 describe('wallets distintas em paralelo', () => {
   let ctx: TestApp;
   let cleanup: () => Promise<void>;
@@ -33,7 +32,6 @@ describe('wallets distintas em paralelo', () => {
     );
 
     for (const wallet of wallets) {
-      // 100 − 6×10 + 4×2.50 = 50.00, independentemente da ordem (o saldo nunca fica insuficiente).
       expect(await walletRow(wallet.id)).toMatchObject({ balance: '50.00', version: 11 });
       await expectWalletMatchesLedger(wallet.id);
     }

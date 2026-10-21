@@ -3,7 +3,6 @@ import { Client } from 'pg';
 import { createOrm } from '../../src/infrastructure/persistence/mikro-orm.config';
 import { POSTGRES_ADMIN_URL, recreateDatabase, withDatabase } from '../support/environment';
 
-/** Banco próprio: este teste faz up → down → up e não pode interferir nos demais. */
 const DATABASE = 'wagering_migrations_test';
 const URL = withDatabase(POSTGRES_ADMIN_URL, DATABASE);
 
@@ -39,7 +38,7 @@ describe('migrations versionadas e reversíveis (§4, §13 integração)', () =>
       expect(up.map((m) => m.name)).toEqual(['Migration20261021000000_initial_schema']);
       expect(await tables()).toEqual(TABLES);
 
-      expect(await orm.migrator.up()).toEqual([]); // idempotente: nada pendente
+      expect(await orm.migrator.up()).toEqual([]);
 
       await orm.migrator.down({ to: 0 });
       expect(await tables()).toEqual([]);

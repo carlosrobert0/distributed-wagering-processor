@@ -61,7 +61,9 @@ describe('Money (AC-MON)', () => {
     });
 
     test('subtract pode produzir negativo (usado em diferenças), negate inverte o sinal', () => {
-      const diff = Money.from({ amount: '1.00', currency: 'BRL' }).subtract(Money.from({ amount: '2.50', currency: 'BRL' }));
+      const diff = Money.from({ amount: '1.00', currency: 'BRL' }).subtract(
+        Money.from({ amount: '2.50', currency: 'BRL' }),
+      );
       expect(diff.isNegative()).toBe(true);
       expect(diff.toJSON().amount).toBe('-1.50');
       expect(diff.negate().toJSON().amount).toBe('1.50');

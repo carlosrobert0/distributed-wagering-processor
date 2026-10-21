@@ -1,21 +1,8 @@
-/**
- * Teste de carga (diferencial opcional, §14): `bun run test:load`.
- *
- * Pré-requisito: `docker compose up -d --build` (3 instâncias em :3001/:3002/:3003).
- *
- * Metodologia:
- *  - cria W wallets com saldo alto; dispara N apostas de 1.00 com concorrência C, distribuídas
- *    em round-robin entre as instâncias; uma fração das wallets é "quente" (recebe 50% do tráfego);
- *  - D% das requisições são reenviadas (duplicatas) para medir o caminho de replay;
- *  - mede latência por requisição (p50/p95/p99), throughput, taxa de erro, 503 (lock timeout),
- *    e lê do /metrics o lag da outbox e os conflitos de lock;
- *  - ao final confere saldo == ledger via /reconciliation em todas as wallets.
- *
- * Variáveis: LOAD_TARGETS, LOAD_WALLETS, LOAD_REQUESTS, LOAD_CONCURRENCY, LOAD_DUPLICATE_RATIO.
- */
 import { randomUUID } from 'node:crypto';
 
-const targets = (process.env.LOAD_TARGETS ?? 'http://localhost:3001,http://localhost:3002,http://localhost:3003').split(',');
+const targets = (process.env.LOAD_TARGETS ?? 'http://localhost:3001,http://localhost:3002,http://localhost:3003').split(
+  ',',
+);
 const walletCount = Number(process.env.LOAD_WALLETS ?? 50);
 const totalRequests = Number(process.env.LOAD_REQUESTS ?? 5_000);
 const concurrency = Number(process.env.LOAD_CONCURRENCY ?? 64);
@@ -53,7 +40,9 @@ async function scrape(url: string, metric: string): Promise<number> {
 }
 
 async function main(): Promise<void> {
-  console.log(`targets=${targets.join(',')} wallets=${walletCount} requests=${totalRequests} concurrency=${concurrency}`);
+  console.log(
+    `targets=${targets.join(',')} wallets=${walletCount} requests=${totalRequests} concurrency=${concurrency}`,
+  );
   const wallets = await Promise.all(Array.from({ length: walletCount }, (_, i) => createWallet(i)));
 
   const latencies: number[] = [];
@@ -62,7 +51,9 @@ async function main(): Promise<void> {
   let next = 0;
 
   const pickWallet = (): Wallet =>
-    Math.random() < 0.5 ? wallets[Math.floor(Math.random() * hotWallets)]! : wallets[Math.floor(Math.random() * walletCount)]!;
+    Math.random() < 0.5
+      ? wallets[Math.floor(Math.random() * hotWallets)]!
+      : wallets[Math.floor(Math.random() * walletCount)]!;
 
   async function worker(): Promise<void> {
     while (next < totalRequests) {
@@ -84,7 +75,10 @@ async function main(): Promise<void> {
         try {
           const response = await fetch(`${target(instance)}/wagering/transactions`, {
             method: 'POST',
-            headers: { 'content-type': 'application/json', 'idempotency-key': `load-provider:${externalTransactionId}` },
+            headers: {
+              'content-type': 'application/json',
+              'idempotency-key': `load-provider:${externalTransactionId}`,
+            },
             body,
           });
           await response.arrayBuffer();
@@ -109,12 +103,15 @@ async function main(): Promise<void> {
   const failures = errors + [...statuses.entries()].filter(([s]) => s >= 500).reduce((n, [, c]) => n + c, 0);
 
   const outboxLag = Math.max(...(await Promise.all(targets.map((t) => scrape(t, 'wagering_outbox_lag_seconds')))));
-  const lockConflicts = (await Promise.all(targets.map((t) => scrape(t, 'wagering_lock_conflicts_total')))).reduce((a, b) => a + b, 0);
+  const lockConflicts = (await Promise.all(targets.map((t) => scrape(t, 'wagering_lock_conflicts_total')))).reduce(
+    (a, b) => a + b,
+    0,
+  );
 
   let inconsistent = 0;
   for (const wallet of wallets) {
-    const reconciliation = (await fetch(`${targets[0]}/wallets/${wallet.id}/reconciliation`, { method: 'POST' }).then((r) =>
-      r.json(),
+    const reconciliation = (await fetch(`${targets[0]}/wallets/${wallet.id}/reconciliation`, { method: 'POST' }).then(
+      (r) => r.json(),
     )) as { consistent: boolean };
     if (!reconciliation.consistent) inconsistent += 1;
   }

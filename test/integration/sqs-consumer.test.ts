@@ -13,8 +13,6 @@ import {
   WagerMessageData,
 } from '../support/sqs';
 
-/** §10 consumer SQS contra LocalStack real: inbox, redelivery, retry, DLQ e shutdown. */
-
 function betMessage(wallet: { id: string; playerId: string }, amount = '10.00'): WagerMessageData {
   const externalTransactionId = `tx-${randomUUID()}`;
   return {
@@ -43,7 +41,6 @@ async function queueIsEmpty(queueName: string): Promise<boolean> {
   return counts.visible === 0 && counts.inFlight === 0;
 }
 
-/** Segura o lock da wallet numa conexão separada — simula uma transação longa de outra instância. */
 async function holdWalletLock(walletId: string): Promise<{ release: () => Promise<void> }> {
   const client: PoolClient = await db.connect();
   await client.query('BEGIN');
@@ -98,7 +95,6 @@ describe('consumer SQS — caminho feliz, inbox e redelivery', () => {
 
     await sendWagerMessage(queues.wagerTransactions, data, { messageId });
     await waitFor(async () => (await transactionStatus(data.externalTransactionId)) === 'PROCESSED');
-    // Redelivery: o produtor reenvia a MESMA mensagem (dedup id diferente para o SQS aceitar).
     await sendWagerMessage(queues.wagerTransactions, data, { messageId });
     await sendWagerMessage(queues.wagerTransactions, data, { messageId });
     await waitFor(() => queueIsEmpty(queues.wagerTransactions), { description: 'duplicates acked' });
@@ -149,7 +145,12 @@ describe('consumer SQS — caminho feliz, inbox e redelivery', () => {
     await sendRawMessage(queues.wagerTransactions, '{not json', { groupId: 'bad-1' });
     await sendRawMessage(
       queues.wagerTransactions,
-      JSON.stringify({ messageId: 'm', type: 'WagerTransactionRequested', occurredAt: new Date().toISOString(), data: { kind: 'BET', money: { amount: 10 } } }),
+      JSON.stringify({
+        messageId: 'm',
+        type: 'WagerTransactionRequested',
+        occurredAt: new Date().toISOString(),
+        data: { kind: 'BET', money: { amount: 10 } },
+      }),
       { groupId: 'bad-2' },
     );
     await waitFor(() => queueIsEmpty(queues.wagerTransactions), { description: 'invalid messages removed' });
@@ -167,7 +168,6 @@ describe('consumer SQS — caminho feliz, inbox e redelivery', () => {
     const lock = await holdWalletLock(wallet.id);
     try {
       await sendWagerMessage(queues.wagerTransactions, data);
-      // Com o lock preso, cada tentativa estoura o lock_timeout (300ms) e volta para a fila com backoff.
       await sleep(1_500);
       expect(await transactionStatus(data.externalTransactionId)).toBeUndefined();
     } finally {
@@ -252,19 +252,28 @@ describe('consumer SQS — shutdown gracioso (AC-SQS-07)', () => {
 
     ctx.consumer.start();
     await sleep(150);
-    await ctx.consumer.stop(); // "SIGTERM": termina o que está em andamento, devolve o resto
+    await ctx.consumer.stop();
 
     const processedAfterStop = Number(
-      (await db.query<{ c: number }>(`SELECT COUNT(*)::int AS c FROM wager_transactions WHERE wallet_id = $1 AND kind = 'BET'`, [wallet.id])).rows[0]!.c,
+      (
+        await db.query<{ c: number }>(
+          `SELECT COUNT(*)::int AS c FROM wager_transactions WHERE wallet_id = $1 AND kind = 'BET'`,
+          [wallet.id],
+        )
+      ).rows[0]!.c,
     );
     expect(processedAfterStop).toBeLessThanOrEqual(8);
 
-    // Uma "nova instância" assume o que sobrou.
     ctx.consumer.start();
     await waitFor(
       async () =>
         Number(
-          (await db.query<{ c: number }>(`SELECT COUNT(*)::int AS c FROM wager_transactions WHERE wallet_id = $1 AND kind = 'BET'`, [wallet.id])).rows[0]!.c,
+          (
+            await db.query<{ c: number }>(
+              `SELECT COUNT(*)::int AS c FROM wager_transactions WHERE wallet_id = $1 AND kind = 'BET'`,
+              [wallet.id],
+            )
+          ).rows[0]!.c,
         ) === 8,
       { timeoutMs: 30_000, description: 'all 8 processed' },
     );

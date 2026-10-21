@@ -27,7 +27,6 @@ export interface WagerResponse {
   error?: string;
 }
 
-/** Cliente HTTP mínimo (fetch nativo) para exercitar a API real. */
 export class ApiClient {
   constructor(readonly baseUrl: string) {}
 
@@ -71,7 +70,6 @@ export class ApiClient {
   }
 }
 
-/** Monta o corpo de uma transação com defaults razoáveis. */
 export function wager(
   wallet: { id: string; playerId: string },
   overrides: Partial<WagerBody> & { amount?: string } = {},
