@@ -61,7 +61,7 @@ export class AppModule {
       { provide: APP_LOGGER, useValue: new PinoAppLogger(rootLogger) },
       { provide: CLOCK, useClass: SystemClock },
       { provide: ID_GENERATOR, useClass: UuidV7Generator },
-      { provide: PrometheusMetrics, useValue: new PrometheusMetrics({ instanceId: config.instanceId }) },
+      { provide: PrometheusMetrics, useValue: new PrometheusMetrics({ instanceId: config.instanceId, collectDefaults: config.metricsCollectDefaults }) },
       { provide: METRICS, useExisting: PrometheusMetrics },
 
       // ---- infraestrutura

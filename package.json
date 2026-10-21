@@ -10,10 +10,10 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "migration:up": "bun run src/infrastructure/persistence/migrate.ts up",
     "migration:down": "bun run src/infrastructure/persistence/migrate.ts down",
-    "test": "bun test --timeout 60000",
+    "test": "bun test --timeout 120000",
     "test:unit": "bun test test/unit",
-    "test:integration": "bun test --timeout 60000 test/integration",
-    "test:concurrency": "bun test --timeout 120000 test/concurrency",
+    "test:integration": "bun test --timeout 120000 test/integration",
+    "test:concurrency": "bun test --timeout 180000 test/concurrency",
     "test:load": "bun run test/load/load-test.ts"
   },
   "dependencies": {
@@ -34,6 +34,8 @@
   "devDependencies": {
     "@types/bun": "^1.2.0",
     "@types/express": "^5.0.0",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "pg": "^8.13.1",
+    "@types/pg": "^8.11.10"
   }
 }

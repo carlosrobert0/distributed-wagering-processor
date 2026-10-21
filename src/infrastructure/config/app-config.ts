@@ -8,6 +8,7 @@ const EnvSchema = z.object({
   PORT: z.coerce.number().int().min(0).max(65535).default(3000),
   INSTANCE_ID: z.string().min(1).default(`instance-${process.pid}`),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
+  METRICS_COLLECT_DEFAULTS: bool.default('true'),
 
   DATABASE_URL: z.string().url().default('postgres://wagering:wagering@localhost:5432/wagering'),
   DB_POOL_MAX: z.coerce.number().int().min(1).default(20),
@@ -63,6 +64,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     port: e.PORT,
     instanceId: e.INSTANCE_ID,
     logLevel: e.LOG_LEVEL,
+    metricsCollectDefaults: e.METRICS_COLLECT_DEFAULTS,
     database: {
       url: e.DATABASE_URL,
       poolMax: e.DB_POOL_MAX,

@@ -10,7 +10,10 @@ import { correlationIdMiddleware } from './interfaces/http/correlation-id.middle
 import { HttpExceptionFilter } from './interfaces/http/http-exception.filter';
 
 /** Monta a aplicação Nest. Usado pelo `main.ts` e pelos testes de integração (mesmo código). */
-export async function createApp(config: AppConfig): Promise<INestApplication> {
+export async function createApp(
+  config: AppConfig,
+  options: { shutdownHooks?: boolean } = {},
+): Promise<INestApplication> {
   const rootLogger = createPinoLogger({ level: config.logLevel, instanceId: config.instanceId });
   const app = await NestFactory.create(AppModule.register(config, rootLogger), {
     logger: new PinoNestLogger(rootLogger),
@@ -21,6 +24,8 @@ export async function createApp(config: AppConfig): Promise<INestApplication> {
   app.use(correlationIdMiddleware);
   app.useGlobalFilters(new HttpExceptionFilter(app.get<AppLogger>(APP_LOGGER)));
   // SIGTERM/SIGINT → beforeApplicationShutdown (consumer e workers drenam) → onApplicationShutdown.
-  app.enableShutdownHooks();
+  if (options.shutdownHooks ?? true) {
+    app.enableShutdownHooks();
+  }
   return app;
 }
