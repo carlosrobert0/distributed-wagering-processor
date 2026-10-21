@@ -197,7 +197,8 @@ Erros que **não** viram transação persistida (respondidos diretamente): `INVA
 | Invariantes da Wallet | `test/unit/domain/wallet.test.ts` |
 | Regras BET/WIN/LOSS/REFUND/ROLLBACK | `test/unit/domain/wager-settlement.test.ts`, `wager-transaction.test.ts` |
 | Conflito de moeda | `money.test.ts`, `wallet.test.ts`, `wager-settlement.test.ts` |
-| Key com payload divergente | `test/unit/application/payload-hash.test.ts`, `test/unit/domain/wager-transaction.test.ts` |
+| Key com payload divergente | `test/unit/application/payload-hash.test.ts`, `test/unit/application/process-wager-transaction.test.ts` |
+| Classificação de erros (HTTP e SQS) | `test/unit/interfaces/error-mapping.test.ts`, `test/unit/interfaces/wager-message.handler.test.ts` |
 | Migrations e constraints | `test/integration/migrations.test.ts`, `schema-constraints.test.ts` |
 | Atomicidade wallet/ledger/inbox/outbox | `test/integration/atomicity.test.ts` |
 | Inbox e redelivery | `test/integration/sqs-consumer.test.ts` |

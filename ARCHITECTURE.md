@@ -253,6 +253,9 @@ Regras do §7 implementadas em `settleWagerTransaction` (domínio). Ordem de val
 
 ### 9.1 Consumer SQS (`wager-transactions.fifo`)
 
+- Duas peças: `WagerMessageHandler` decide o destino de cada mensagem (`ack` / `retry` / `dead-letter`)
+  sem conhecer o SQS — testável em unidade —, e `WagerTransactionsConsumer` executa a decisão (long-poll,
+  grupos, ack, visibilidade, DLQ, shutdown).
 - Reusa **o mesmo** `ProcessWagerTransactionUseCase` do HTTP.
 - **Inbox** `(consumer_name, message_id)` gravada **na mesma transação** do efeito
   (`INSERT … ON CONFLICT DO NOTHING`). Também consultada no caminho rápido.
@@ -337,8 +340,11 @@ Rejeição de negócio é 422 (e não 200 com `status: REJECTED`) para que o pro
 
 ## 12. Autenticação (decisão: não implementada)
 
-Vale 0 pontos e competiria com o que importa. O ponto de extensão está explícito:
-`ProviderAuthGuard` (global, no-op) + decorator `@Public()` para health/métricas.
+Vale 0 pontos e competiria com o que importa. O ponto de extensão está explícito no código:
+`ProviderAuthGuard` (global) delega à porta `ProviderAuthenticator`, que recebe o header
+`Authorization` e o `providerId` do payload. A implementação registrada é
+`AllowAllProviderAuthenticator`; rotas `@Public()` (health/métricas) nem consultam a porta.
+Ligar a autenticação = registrar outra implementação da porta, sem tocar em controllers.
 
 **Desenho que adotaria (Keycloak, OIDC):**
 1. Realm `wagering`; cada provedor é um *client confidencial* que obtém token via **client credentials**.
@@ -354,11 +360,15 @@ Vale 0 pontos e competiria com o que importa. O ponto de extensão está explíc
 
 | Tipo | O que prova | Onde |
 |---|---|---|
-| Unidade | Money, Wallet, ledger, máquina de estados, regras BET/WIN/LOSS/REFUND/ROLLBACK, backoff, hash canônico | `test/unit` |
+| Unidade — domínio | Money, Wallet, ledger, máquina de estados, regras BET/WIN/LOSS/REFUND/ROLLBACK, backoff, hash canônico | `test/unit/domain` |
+| Unidade — aplicação | orquestração dos use cases (replay, conflitos, inbox, corrida de unicidade, PENDING_REFERENCE, outbox) sobre um `UnitOfWork` em memória com commit/rollback | `test/unit/application` |
+| Unidade — bordas | erro → status HTTP, resultado → status, classificação SQS, SQLSTATE → transitório, decisões do handler SQS, guard, config | `test/unit/interfaces` |
 | Integração | migrations up/down, cada constraint/trigger, atomicidade (falha injetada antes do commit), API, outbox (2 publishers, crash, retry, duplicata), consumer (inbox, redelivery, retry, DLQ, shutdown), fora de ordem | `test/integration` |
 | Concorrência | 100−80−80 (25×), hot wallet, 50× mesma aposta, wallets em paralelo, 3 processos, crash antes do ack, SIGKILL + reinício | `test/concurrency` |
 
-- **Sem mocks de Postgres ou SQS:** tudo roda contra os containers do `docker compose`.
+- **Sem mocks de Postgres ou SQS nos testes de integração e concorrência:** rodam contra os containers
+  do `docker compose`. O `UnitOfWork` em memória existe só para testar orquestração em milissegundos; as
+  garantias (locks, constraints, atomicidade) são provadas apenas contra o Postgres real.
 - **Paralelismo real:** `Promise.all` de requisições HTTP (pool com conexões distintas) e processos
   separados via `Bun.spawn` (`bun run src/main.ts`).
 - **Invariante final:** `expectWalletMatchesLedger` / `expectAllWalletsMatchLedger` recalculam o saldo
@@ -370,7 +380,16 @@ Vale 0 pontos e competiria com o que importa. O ponto de extensão está explíc
 
 ---
 
-## 14. Trade-offs e limitações conhecidas
+## 14. Convenções de código
+
+- Sem comentários no código: nomes de classes, métodos, constantes e constraints carregam a intenção;
+  o *porquê* das decisões vive neste documento e no `SPEC.md`.
+- Formatação única com Prettier (`bun run format` / `bun run format:check`) e TypeScript strict
+  (`noUncheckedIndexedAccess`, `noImplicitOverride`).
+- Erros de entrada de JSON (malformado, grande demais) são tratados por um parser próprio e respondem no
+  mesmo formato `{ error, message }` do resto da API.
+
+## 15. Trade-offs e limitações conhecidas
 
 - **Throughput por wallet é serializado** (lock pessimista). Correto para dinheiro; escala por wallets.
 - **Relay publica dentro da transação de claim:** as linhas ficam travadas enquanto o SQS responde.

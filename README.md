@@ -51,7 +51,8 @@ docker compose up -d postgres localstack     # dependências
 bun install
 
 bun run typecheck           # tsc --noEmit (strict)
-bun run test:unit           # domínio e aplicação, sem I/O
+bun run format:check        # Prettier
+bun run test:unit           # domínio, use cases (UoW em memória) e bordas, sem I/O
 bun run test:integration    # constraints, migrations, atomicidade, API, outbox, consumer SQS
 bun run test:concurrency    # 100−80−80, 50× mesma aposta, 3 processos, crash antes do ack, reinício
 bun test                    # tudo
@@ -143,6 +144,6 @@ docker/localstack/init-sqs.sh   docker-compose.yml   Dockerfile
 
 ## Autenticação
 
-Não implementada por decisão (vale 0 pontos). O ponto de extensão é o `ProviderAuthGuard` (no-op), e o
-desenho com Keycloak (client credentials por provedor, `providerId` do token comparado com o do payload)
+Não implementada por decisão (vale 0 pontos). O ponto de extensão é a porta `ProviderAuthenticator`
+usada pelo `ProviderAuthGuard` (hoje com a implementação `AllowAllProviderAuthenticator`), e o desenho com Keycloak (client credentials por provedor, `providerId` do token comparado com o do payload)
 está em [`ARCHITECTURE.md` §12](ARCHITECTURE.md).
