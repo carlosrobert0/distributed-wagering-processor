@@ -1,5 +1,6 @@
 import { IsolationLevel } from '@mikro-orm/core';
 import { EntityManager, MikroORM } from '@mikro-orm/postgresql';
+import { Metrics } from '../../application/ports/system';
 import { TransactionScope, UnitOfWork } from '../../application/ports/unit-of-work';
 import { toTransientError } from './database-errors';
 import { MikroOrmInboxRepository, MikroOrmOutboxRepository } from './repositories/messaging.repositories';
@@ -30,6 +31,7 @@ export class MikroOrmUnitOfWork implements UnitOfWork {
   constructor(
     private readonly orm: MikroORM,
     options: UnitOfWorkOptions,
+    private readonly metrics?: Metrics,
   ) {
     this.timeouts = [
       `${Math.max(1, Math.trunc(options.lockTimeoutMs))}ms`,
@@ -51,7 +53,11 @@ export class MikroOrmUnitOfWork implements UnitOfWork {
         { isolationLevel: IsolationLevel.READ_COMMITTED },
       );
     } catch (error) {
-      throw toTransientError(error) ?? error;
+      const transient = toTransientError(error);
+      if (transient?.reason === 'lock_timeout' || transient?.reason === 'deadlock') {
+        this.metrics?.lockConflict(transient.reason);
+      }
+      throw transient ?? error;
     }
   }
 }

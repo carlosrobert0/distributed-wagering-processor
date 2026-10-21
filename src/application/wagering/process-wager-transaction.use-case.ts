@@ -150,8 +150,9 @@ export class ProcessWagerTransactionUseCase {
     return toResult(existing, true);
   }
 
-  private buildDraft(command: SubmitWagerTransactionCommand): WagerTransaction {
-    assertUuid('walletId', command.walletId);
+  private buildDraft(input: SubmitWagerTransactionCommand): WagerTransaction {
+    assertUuid('walletId', input.walletId);
+    const command = { ...input, walletId: input.walletId.toLowerCase() };
     const kind = parseSubmittableKind(command.kind);
     return asPayloadError(() =>
       WagerTransaction.create({
@@ -160,7 +161,7 @@ export class ProcessWagerTransactionUseCase {
         externalTransactionId: command.externalTransactionId,
         idempotencyKey: command.idempotencyKey,
         payloadHash: computeWagerPayloadHash(command),
-        walletId: command.walletId.toLowerCase(),
+        walletId: command.walletId,
         playerId: command.playerId,
         roundId: command.roundId,
         gameId: command.gameId,
