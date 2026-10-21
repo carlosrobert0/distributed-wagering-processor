@@ -17,7 +17,14 @@ export class MikroOrmInboxRepository implements InboxRepository {
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (consumer_name, message_id) DO NOTHING
        RETURNING message_id`,
-      [message.consumerName, message.messageId, message.payloadHash, message.receivedAt, message.processedAt ?? null],
+      [
+        message.consumerName,
+        message.messageId,
+        message.payloadHash,
+        // ISO-8601 com fuso explícito: o parâmetro é interpolado como texto em timestamptz.
+        message.receivedAt.toISOString(),
+        message.processedAt?.toISOString() ?? null,
+      ],
     );
     return rows.length === 1;
   }
