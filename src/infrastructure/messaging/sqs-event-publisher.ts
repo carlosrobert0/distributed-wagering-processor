@@ -3,13 +3,6 @@ import { EventPublisher } from '../../application/ports/system';
 import { OutboxMessage } from '../../domain/messaging/outbox-message';
 import { SqsQueues } from './sqs';
 
-/**
- * Publica eventos da outbox na fila FIFO de eventos (INT-09).
- *
- * - `MessageGroupId = partitionKey (walletId)`: ordem por wallet;
- * - `MessageDeduplicationId = eventId`: republicações dentro de 5 min são descartadas pelo SQS.
- *   É otimização — a garantia final é o consumidor deduplicar por `eventId` (AC-OUT-04).
- */
 export class SqsEventPublisher implements EventPublisher {
   constructor(
     private readonly queues: SqsQueues,

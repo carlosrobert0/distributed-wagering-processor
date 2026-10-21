@@ -12,10 +12,6 @@ interface SummaryRow {
   chain_breaks: number;
 }
 
-/**
- * Reconstrução do saldo feita no banco, em NUMERIC (exato) e devolvida como texto:
- * nenhum valor monetário passa por `number` no caminho.
- */
 const SUMMARY_SQL = `
   WITH ordered AS (
     SELECT direction, amount, balance_before, balance_after, wallet_version,

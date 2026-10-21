@@ -7,7 +7,6 @@ export interface IntegrationEventProps<T> {
   data: T;
 }
 
-/** Contexto para construir eventos; ids são gerados fora do domínio. */
 export interface EventContext {
   correlationId: string;
   causationId?: string;
@@ -26,10 +25,6 @@ export interface IntegrationEventEnvelope<T> {
   data: T;
 }
 
-/**
- * Envelope de evento de integração. `eventType` e `version` ficam no tipo concreto, nunca em
- * string solta no call site. `data` contém apenas JSON estável (`MoneyProps`, nunca `Money`).
- */
 export abstract class IntegrationEvent<T> {
   abstract readonly eventType: string;
   abstract readonly version: number;
@@ -50,10 +45,6 @@ export abstract class IntegrationEvent<T> {
     this.data = Object.freeze({ ...props.data });
   }
 
-  /**
-   * Chave de ordenação na publicação (MessageGroupId da fila FIFO). Por padrão o agregado;
-   * eventos de transação usam a wallet para manter a ordem por wallet.
-   */
   get partitionKey(): string {
     return this.aggregateId;
   }

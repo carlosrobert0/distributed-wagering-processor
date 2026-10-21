@@ -5,13 +5,6 @@ import { UnitOfWork } from '../ports/unit-of-work';
 import { assertUuid } from '../validation';
 import { ReconciliationView } from './wallet.views';
 
-/**
- * Compara o saldo materializado com o saldo reconstruído pelo ledger (AC-API-07).
- *
- * Lê sob `FOR SHARE` na wallet: escritores esperam a leitura terminar, então saldo e ledger
- * vêm do mesmo instante lógico. Divergências NUNCA são corrigidas aqui — são logadas,
- * contadas em métrica e devolvidas com `consistent: false` para investigação.
- */
 export class ReconcileWalletUseCase {
   constructor(
     private readonly uow: UnitOfWork,

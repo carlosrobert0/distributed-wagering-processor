@@ -5,20 +5,46 @@ import { RetryPendingReferencesUseCase } from '../../application/wagering/retry-
 import { WagerTransactionsConsumer } from '../sqs/wager-transactions.consumer';
 import { PollingWorker } from './polling-worker';
 
-export interface BackgroundWorkersOptions {
-  consumerEnabled: boolean;
-  outboxRelay: { enabled: boolean; intervalMs: number; batchSize: number };
-  pendingReference: { enabled: boolean; intervalMs: number; batchSize: number };
+export interface PollingSettings {
+  enabled: boolean;
+  intervalMs: number;
+  batchSize: number;
 }
 
-/**
- * Liga/desliga os processos em segundo plano junto com o ciclo de vida do Nest.
- *
- * `beforeApplicationShutdown` roda no SIGTERM (com `enableShutdownHooks`) ANTES de fechar o
- * HTTP e o pool do banco: consumer para de buscar e drena; workers terminam o ciclo atual.
- */
+export interface BackgroundWorkersOptions {
+  consumerEnabled: boolean;
+  outboxRelay: PollingSettings;
+  pendingReference: PollingSettings;
+}
+
+function outboxRelayWorker(useCase: PublishOutboxUseCase, settings: PollingSettings, logger: AppLogger) {
+  return new PollingWorker(
+    {
+      name: 'outbox-relay',
+      intervalMs: settings.intervalMs,
+      tick: async () => {
+        const result = await useCase.publishBatch(settings.batchSize);
+        await useCase.refreshBacklogMetrics();
+        return result.claimed === settings.batchSize && result.failed === 0;
+      },
+    },
+    logger,
+  );
+}
+
+function pendingReferenceWorker(useCase: RetryPendingReferencesUseCase, settings: PollingSettings, logger: AppLogger) {
+  return new PollingWorker(
+    {
+      name: 'pending-reference',
+      intervalMs: settings.intervalMs,
+      tick: async () => (await useCase.runOnce(settings.batchSize)).candidates === settings.batchSize,
+    },
+    logger,
+  );
+}
+
 export class BackgroundWorkers implements OnApplicationBootstrap, BeforeApplicationShutdown {
-  private readonly workers: PollingWorker[] = [];
+  private readonly workers: PollingWorker[];
 
   constructor(
     private readonly consumer: WagerTransactionsConsumer,
@@ -27,38 +53,12 @@ export class BackgroundWorkers implements OnApplicationBootstrap, BeforeApplicat
     private readonly options: BackgroundWorkersOptions,
     logger: AppLogger,
   ) {
-    if (options.outboxRelay.enabled) {
-      this.workers.push(
-        new PollingWorker(
-          {
-            name: 'outbox-relay',
-            intervalMs: options.outboxRelay.intervalMs,
-            tick: async () => {
-              const result = await publishOutbox.publishBatch(options.outboxRelay.batchSize);
-              await publishOutbox.refreshBacklogMetrics();
-              // Lote cheio e sem falhas → provavelmente há mais; não espera o intervalo.
-              return result.claimed === options.outboxRelay.batchSize && result.failed === 0;
-            },
-          },
-          logger,
-        ),
-      );
-    }
-    if (options.pendingReference.enabled) {
-      this.workers.push(
-        new PollingWorker(
-          {
-            name: 'pending-reference',
-            intervalMs: options.pendingReference.intervalMs,
-            tick: async () => {
-              const result = await retryPendingReferences.runOnce(options.pendingReference.batchSize);
-              return result.candidates === options.pendingReference.batchSize;
-            },
-          },
-          logger,
-        ),
-      );
-    }
+    this.workers = [
+      ...(options.outboxRelay.enabled ? [outboxRelayWorker(publishOutbox, options.outboxRelay, logger)] : []),
+      ...(options.pendingReference.enabled
+        ? [pendingReferenceWorker(retryPendingReferences, options.pendingReference, logger)]
+        : []),
+    ];
   }
 
   onApplicationBootstrap(): void {

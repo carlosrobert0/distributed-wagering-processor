@@ -53,7 +53,6 @@ export function toLedgerEntryView(entry: WalletLedgerEntry): LedgerEntryView {
 export interface LedgerPageView {
   walletId: string;
   entries: LedgerEntryView[];
-  /** Cursor opaco para a próxima página; ausente quando não há mais lançamentos. */
   nextCursor?: string;
 }
 
@@ -64,6 +63,5 @@ export interface ReconciliationView {
   difference: MoneyProps;
   consistent: boolean;
   checkedEntries: number;
-  /** Detalhes das divergências encontradas (vazio quando consistente). */
   issues: string[];
 }

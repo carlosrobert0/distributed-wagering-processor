@@ -3,15 +3,9 @@ import { AppLogger } from '../../application/ports/system';
 export interface PollingWorkerOptions {
   name: string;
   intervalMs: number;
-  /** Executa um ciclo; retorna `true` se ainda há trabalho imediato (encadeia sem esperar). */
   tick: () => Promise<boolean>;
 }
 
-/**
- * Laço de polling com parada graciosa. Nenhum estado de coordenação em memória: a divisão de
- * trabalho entre instâncias é feita no banco (`FOR UPDATE SKIP LOCKED`), então rodar N cópias
- * deste worker é seguro.
- */
 export class PollingWorker {
   private running = false;
   private loop?: Promise<void>;
@@ -29,7 +23,6 @@ export class PollingWorker {
     this.logger.info('worker started', { worker: this.options.name });
   }
 
-  /** Espera o ciclo em andamento terminar (nunca interrompe uma transação no meio). */
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;

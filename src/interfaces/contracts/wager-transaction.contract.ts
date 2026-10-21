@@ -1,31 +1,24 @@
 import { z } from 'zod';
 
-/**
- * Contrato de entrada compartilhado por HTTP e SQS. Valida só a FORMA (tipos, presença,
- * tamanhos); as regras de valor (`Money`, referência obrigatória, OPENING proibido) são do
- * domínio — fonte única da verdade. Campos desconhecidos são descartados (não entram no hash).
- */
 const notBlank = (value: string) => value.trim().length > 0;
 const identifier = z.string().min(1).max(128).refine(notBlank, 'must not be blank');
 
-export const MoneyContract = z
-  .object({
-    amount: z.string({ invalid_type_error: 'amount must be a decimal string, e.g. "25.00"' }),
-    currency: z.string(),
-  });
+export const MoneyContract = z.object({
+  amount: z.string({ invalid_type_error: 'amount must be a decimal string, e.g. "25.00"' }),
+  currency: z.string(),
+});
 
-export const WagerTransactionContract = z
-  .object({
-    providerId: identifier,
-    externalTransactionId: identifier,
-    playerId: identifier,
-    walletId: z.string().uuid(),
-    roundId: identifier,
-    gameId: identifier,
-    kind: z.string(),
-    money: MoneyContract,
-    referenceExternalTransactionId: identifier.optional(),
-  });
+export const WagerTransactionContract = z.object({
+  providerId: identifier,
+  externalTransactionId: identifier,
+  playerId: identifier,
+  walletId: z.string().uuid(),
+  roundId: identifier,
+  gameId: identifier,
+  kind: z.string(),
+  money: MoneyContract,
+  referenceExternalTransactionId: identifier.optional(),
+});
 
 export type WagerTransactionInput = z.infer<typeof WagerTransactionContract>;
 
@@ -41,11 +34,10 @@ export const WagerTransactionMessageContract = z.object({
 
 export type WagerTransactionMessage = z.infer<typeof WagerTransactionMessageContract>;
 
-export const CreateWalletContract = z
-  .object({
-    playerId: identifier,
-    initialBalance: MoneyContract,
-  });
+export const CreateWalletContract = z.object({
+  playerId: identifier,
+  initialBalance: MoneyContract,
+});
 
 export function describeZodError(error: z.ZodError): string[] {
   return error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`);

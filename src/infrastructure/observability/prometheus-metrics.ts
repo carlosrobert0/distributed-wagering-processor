@@ -1,10 +1,6 @@
 import { Counter, Gauge, Histogram, Registry, collectDefaultMetrics } from 'prom-client';
 import { Metrics, ProcessingSource } from '../../application/ports/system';
 
-/**
- * Métricas Prometheus (AC-OBS-03), expostas em `GET /metrics`. Registro por instância — o
- * Prometheus agrega entre instâncias pelo label `instance` do scrape.
- */
 export class PrometheusMetrics implements Metrics {
   readonly registry = new Registry();
 

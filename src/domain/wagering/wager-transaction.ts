@@ -1,10 +1,13 @@
-import { InvalidTransactionStateError, InvalidWagerTransactionError, InvariantViolationError } from '../shared/domain-error';
+import {
+  InvalidTransactionStateError,
+  InvalidWagerTransactionError,
+  InvariantViolationError,
+} from '../shared/domain-error';
 import { Money } from '../shared/money';
 import { LedgerDirection } from '../wallet/wallet-ledger-entry';
 import { FailureCode } from './failure-code';
 
 export enum WagerTransactionKind {
-  /** Interno: crédito de abertura da wallet. Nunca aceito pela API nem pela fila. */
   Opening = 'OPENING',
   Bet = 'BET',
   Win = 'WIN',
@@ -14,16 +17,13 @@ export enum WagerTransactionKind {
 }
 
 export enum WagerTransactionStatus {
-  /** Aceita, ainda não aplicada. Existe apenas em memória durante o processamento. */
   Pending = 'PENDING',
-  /** Aguardando a transação referenciada chegar. */
   PendingReference = 'PENDING_REFERENCE',
   Processed = 'PROCESSED',
   Rejected = 'REJECTED',
   Failed = 'FAILED',
 }
 
-/** Provider reservado para transações internas (OPENING). */
 export const INTERNAL_PROVIDER_ID = 'internal';
 
 const TERMINAL_STATUSES: ReadonlySet<WagerTransactionStatus> = new Set([
@@ -32,15 +32,18 @@ const TERMINAL_STATUSES: ReadonlySet<WagerTransactionStatus> = new Set([
   WagerTransactionStatus.Failed,
 ]);
 
-const SUBMITTABLE_KINDS: ReadonlySet<string> = new Set([
+export const SUBMITTABLE_KINDS: readonly WagerTransactionKind[] = [
   WagerTransactionKind.Bet,
   WagerTransactionKind.Win,
   WagerTransactionKind.Loss,
   WagerTransactionKind.Refund,
   WagerTransactionKind.Rollback,
-]);
+];
 
-/** Para cada kind, quais kinds ele pode referenciar (regra 3 da §7 + INT-03). */
+export function isSubmittableKind(kind: unknown): kind is WagerTransactionKind {
+  return SUBMITTABLE_KINDS.includes(kind as WagerTransactionKind);
+}
+
 const ALLOWED_REFERENCE_KINDS: Readonly<Record<WagerTransactionKind, ReadonlySet<WagerTransactionKind>>> = {
   [WagerTransactionKind.Opening]: new Set(),
   [WagerTransactionKind.Bet]: new Set(),
@@ -78,7 +81,6 @@ export interface WagerTransactionState extends CreateWagerTransactionProps {
   referenceTransactionId?: string;
   failureCode?: FailureCode;
   processedAt?: Date;
-  /** Saldo observado no momento da decisão — devolvido nos replays (regra 7). */
   balanceAfter?: Money;
   referenceAttempts: number;
   nextReferenceCheckAt?: Date;
@@ -93,14 +95,6 @@ export interface OpeningTransactionProps {
   createdAt: Date;
 }
 
-/**
- * Transação de aposta recebida de um provedor.
- *
- * Máquina de estados (AC-TX-02):
- *   PENDING ──► PROCESSED | REJECTED | FAILED | PENDING_REFERENCE
- *   PENDING_REFERENCE ──► PROCESSED | REJECTED | FAILED | PENDING_REFERENCE (nova tentativa agendada)
- * PROCESSED, REJECTED e FAILED são terminais.
- */
 export class WagerTransaction {
   private constructor(
     public readonly id: string,
@@ -114,7 +108,6 @@ export class WagerTransaction {
     public readonly gameId: string,
     public readonly kind: WagerTransactionKind,
     public readonly money: Money,
-    /** id no provedor — não o id interno */
     public readonly referenceExternalTransactionId: string | undefined,
     public readonly createdAt: Date,
     private _status: WagerTransactionStatus,
@@ -126,9 +119,8 @@ export class WagerTransaction {
     private _nextReferenceCheckAt?: Date,
   ) {}
 
-  /** Nasce em PENDING. Valida a forma da transação e a exigência de referência por kind. */
   static create(props: CreateWagerTransactionProps): WagerTransaction {
-    if (!SUBMITTABLE_KINDS.has(props.kind)) {
+    if (!isSubmittableKind(props.kind)) {
       throw new InvalidWagerTransactionError(`kind "${String(props.kind)}" cannot be submitted`);
     }
     if (props.providerId === INTERNAL_PROVIDER_ID) {
@@ -144,7 +136,6 @@ export class WagerTransaction {
     if (props.money.isNegative()) {
       throw new InvalidWagerTransactionError('money cannot be negative');
     }
-    // INT-02: somente LOSS pode ter valor zero.
     if (props.kind !== WagerTransactionKind.Loss && !props.money.isPositive()) {
       throw new InvalidWagerTransactionError(`money must be positive for ${props.kind}`);
     }
@@ -182,7 +173,6 @@ export class WagerTransaction {
     );
   }
 
-  /** Transação interna de abertura (INT-10). Nunca construída a partir de entrada externa. */
   static opening(props: OpeningTransactionProps): WagerTransaction {
     if (!props.money.isPositive()) {
       throw new InvariantViolationError('OPENING requires a positive amount');
@@ -262,8 +252,6 @@ export class WagerTransaction {
     return this._nextReferenceCheckAt;
   }
 
-  // ---- transições -------------------------------------------------------------------------
-
   markProcessed(params: { referenceTransactionId: string | undefined; balanceAfter: Money; at: Date }): void {
     this.assertNotTerminal(WagerTransactionStatus.Processed);
     if (this.requiresReference() && !params.referenceTransactionId) {
@@ -276,7 +264,6 @@ export class WagerTransaction {
     this._nextReferenceCheckAt = undefined;
   }
 
-  /** Primeira vez que a referência não foi encontrada. */
   markPendingReference(nextCheckAt: Date): void {
     if (this._status !== WagerTransactionStatus.Pending) {
       throw new InvalidTransactionStateError(this.id, this._status, WagerTransactionStatus.PendingReference);
@@ -286,7 +273,6 @@ export class WagerTransaction {
     this._nextReferenceCheckAt = nextCheckAt;
   }
 
-  /** A referência continua ausente após uma nova verificação do worker. */
   scheduleReferenceRetry(nextCheckAt: Date): void {
     if (this._status !== WagerTransactionStatus.PendingReference) {
       throw new InvalidTransactionStateError(this.id, this._status, WagerTransactionStatus.PendingReference);
@@ -295,7 +281,6 @@ export class WagerTransaction {
     this._nextReferenceCheckAt = nextCheckAt;
   }
 
-  /** Conta a verificação que esgotou o limite, antes de rejeitar. */
   recordReferenceAttempt(): void {
     if (this._status !== WagerTransactionStatus.PendingReference) {
       throw new InvalidTransactionStateError(this.id, this._status, 'REFERENCE_ATTEMPT');
@@ -319,8 +304,6 @@ export class WagerTransaction {
     this._processedAt = at;
     this._nextReferenceCheckAt = undefined;
   }
-
-  // ---- consultas de domínio -----------------------------------------------------------------
 
   isTerminal(): boolean {
     return TERMINAL_STATUSES.has(this._status);
@@ -350,7 +333,6 @@ export class WagerTransaction {
     return this.payloadHash === payloadHash;
   }
 
-  /** BET → DEBIT; WIN/REFUND/OPENING → CREDIT; ROLLBACK → inverso da referência. LOSS não tem direção. */
   ledgerDirectionFor(reference?: WagerTransaction): LedgerDirection {
     switch (this.kind) {
       case WagerTransactionKind.Bet:

@@ -1,4 +1,3 @@
-# Bun executa TypeScript diretamente: não há etapa de build/transpile.
 FROM oven/bun:1.3 AS deps
 WORKDIR /app
 COPY package.json bun.lock* ./

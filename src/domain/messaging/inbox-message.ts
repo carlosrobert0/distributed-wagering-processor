@@ -11,11 +11,6 @@ export interface InboxMessageState extends ReceiveInboxProps {
   processedAt?: Date;
 }
 
-/**
- * Registro de deduplicação de mensagens consumidas, chave `(consumerName, messageId)`.
- * Gravado na mesma transação SQL do efeito financeiro: se o commit acontece, a mensagem
- * nunca mais produz efeito, mesmo que o ack ao SQS se perca.
- */
 export class InboxMessage {
   private constructor(
     public readonly messageId: string,

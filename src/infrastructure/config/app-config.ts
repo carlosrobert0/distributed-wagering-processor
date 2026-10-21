@@ -1,8 +1,6 @@
 import { z } from 'zod';
 
-const bool = z
-  .enum(['true', 'false', '1', '0'])
-  .transform((value) => value === 'true' || value === '1');
+const bool = z.enum(['true', 'false', '1', '0']).transform((value) => value === 'true' || value === '1');
 
 const EnvSchema = z.object({
   PORT: z.coerce.number().int().min(0).max(65535).default(3000),
@@ -39,15 +37,10 @@ const EnvSchema = z.object({
   PENDING_REFERENCE_WORKER_ENABLED: bool.default('true'),
   PENDING_REFERENCE_INTERVAL_MS: z.coerce.number().int().min(10).default(1_000),
   PENDING_REFERENCE_BATCH_SIZE: z.coerce.number().int().min(1).default(50),
-  /** Base do backoff de PENDING_REFERENCE (ms). Testes reduzem para não esperar minutos. */
   PENDING_REFERENCE_BASE_DELAY_MS: z.coerce.number().int().min(1).default(2_000),
   PENDING_REFERENCE_MAX_DELAY_MS: z.coerce.number().int().min(1).default(300_000),
   PENDING_REFERENCE_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(8),
 
-  /**
-   * Ponto de injeção de falha usado SOMENTE pelos testes de crash (§13, cenário 5):
-   * `crash-after-commit` mata o processo depois do commit e antes do ack ao SQS.
-   */
   FAULT_INJECTION: z.enum(['none', 'crash-after-commit']).default('none'),
 });
 

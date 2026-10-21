@@ -12,13 +12,11 @@ export class HealthController {
     @Inject(PrometheusMetrics) private readonly metrics: PrometheusMetrics,
   ) {}
 
-  /** Liveness: o processo responde. Não toca dependências (evita restart em cascata). */
   @Get('health/live')
   live(): { status: 'ok' } {
     return { status: 'ok' };
   }
 
-  /** Readiness: PostgreSQL e SQS alcançáveis. 503 tira a instância do balanceador. */
   @Get('health/ready')
   async ready(@Res({ passthrough: true }) response: Response) {
     const report = await this.readiness.check();

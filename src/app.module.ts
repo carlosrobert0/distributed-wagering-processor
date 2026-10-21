@@ -33,14 +33,19 @@ import { ReadinessProbe } from './infrastructure/observability/readiness-probe';
 import { createOrm } from './infrastructure/persistence/mikro-orm.config';
 import { MikroOrmUnitOfWork } from './infrastructure/persistence/mikro-orm-unit-of-work';
 import { SystemClock, UuidV7Generator } from './infrastructure/system/system-adapters';
-import { ProviderAuthGuard } from './interfaces/http/auth.guard';
+import {
+  AllowAllProviderAuthenticator,
+  PROVIDER_AUTHENTICATOR,
+  ProviderAuthenticator,
+  ProviderAuthGuard,
+} from './interfaces/http/auth.guard';
 import { HealthController } from './interfaces/http/health.controller';
 import { WageringController } from './interfaces/http/wagering.controller';
 import { WalletsController } from './interfaces/http/wallets.controller';
+import { WagerMessageHandler } from './interfaces/sqs/wager-message.handler';
 import { WagerTransactionsConsumer } from './interfaces/sqs/wager-transactions.consumer';
 import { BackgroundWorkers } from './interfaces/workers/background-workers';
 
-/** Fecha o pool do banco DEPOIS que consumer e workers pararam (beforeApplicationShutdown). */
 class OrmLifecycle implements OnApplicationShutdown {
   constructor(private readonly orm: MikroORM) {}
 
@@ -49,11 +54,6 @@ class OrmLifecycle implements OnApplicationShutdown {
   }
 }
 
-/**
- * Composition root: o único lugar que conhece todas as camadas. Domínio e aplicação são classes
- * puras (sem decorators do Nest); aqui elas são instanciadas por factories e expostas aos
- * controllers por token explícito.
- */
 @Module({})
 export class AppModule {
   static register(config: AppConfig, rootLogger: Logger): DynamicModule {
@@ -61,10 +61,15 @@ export class AppModule {
       { provide: APP_LOGGER, useValue: new PinoAppLogger(rootLogger) },
       { provide: CLOCK, useClass: SystemClock },
       { provide: ID_GENERATOR, useClass: UuidV7Generator },
-      { provide: PrometheusMetrics, useValue: new PrometheusMetrics({ instanceId: config.instanceId, collectDefaults: config.metricsCollectDefaults }) },
+      {
+        provide: PrometheusMetrics,
+        useValue: new PrometheusMetrics({
+          instanceId: config.instanceId,
+          collectDefaults: config.metricsCollectDefaults,
+        }),
+      },
       { provide: METRICS, useExisting: PrometheusMetrics },
 
-      // ---- infraestrutura
       {
         provide: MikroORM,
         useFactory: () => createOrm({ url: config.database.url, poolMax: config.database.poolMax }),
@@ -93,7 +98,6 @@ export class AppModule {
         inject: [MikroORM, SqsQueues],
       },
 
-      // ---- aplicação
       {
         provide: WagerSettlementService,
         useFactory: (ids: IdGenerator, clock: Clock, metrics: Metrics) =>
@@ -157,15 +161,19 @@ export class AppModule {
         inject: [UNIT_OF_WORK, WagerSettlementService, CLOCK, METRICS, APP_LOGGER],
       },
 
-      // ---- adaptadores de entrada assíncronos
+      {
+        provide: WagerMessageHandler,
+        useFactory: (process: ProcessWagerTransactionUseCase, logger: AppLogger) =>
+          new WagerMessageHandler(process, config.consumer.name, logger),
+        inject: [ProcessWagerTransactionUseCase, APP_LOGGER],
+      },
       {
         provide: WagerTransactionsConsumer,
-        useFactory: (process: ProcessWagerTransactionUseCase, queues: SqsQueues, metrics: Metrics, logger: AppLogger) =>
+        useFactory: (handler: WagerMessageHandler, queues: SqsQueues, metrics: Metrics, logger: AppLogger) =>
           new WagerTransactionsConsumer(
-            process,
+            handler,
             queues,
             {
-              consumerName: config.consumer.name,
               queueName: config.queues.wagerTransactions,
               dlqName: config.queues.wagerTransactionsDlq,
               waitTimeSeconds: config.consumer.waitTimeSeconds,
@@ -179,7 +187,7 @@ export class AppModule {
             metrics,
             logger,
           ),
-        inject: [ProcessWagerTransactionUseCase, SqsQueues, METRICS, APP_LOGGER],
+        inject: [WagerMessageHandler, SqsQueues, METRICS, APP_LOGGER],
       },
       {
         provide: BackgroundWorkers,
@@ -203,11 +211,12 @@ export class AppModule {
         inject: [WagerTransactionsConsumer, PublishOutboxUseCase, RetryPendingReferencesUseCase, APP_LOGGER],
       },
 
-      // ---- borda HTTP
+      { provide: PROVIDER_AUTHENTICATOR, useClass: AllowAllProviderAuthenticator },
       {
         provide: APP_GUARD,
-        useFactory: (reflector: Reflector) => new ProviderAuthGuard(reflector),
-        inject: [Reflector],
+        useFactory: (reflector: Reflector, authenticator: ProviderAuthenticator) =>
+          new ProviderAuthGuard(reflector, authenticator),
+        inject: [Reflector, PROVIDER_AUTHENTICATOR],
       },
     ];
 

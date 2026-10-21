@@ -24,12 +24,6 @@ export interface SettlementContext {
   source: ProcessingSource;
 }
 
-/**
- * Orquestra uma liquidação dentro de uma transação SQL já aberta e com a wallet travada:
- * busca a referência, chama o serviço de domínio e persiste — transação, lançamento, saldo e
- * eventos de outbox — no mesmo escopo (AC-OUT-01). Compartilhado pela entrada (HTTP/SQS) e pelo
- * worker de PENDING_REFERENCE, garantindo que ambos apliquem exatamente as mesmas regras.
- */
 export class WagerSettlementService {
   constructor(
     private readonly ids: IdGenerator,
@@ -58,7 +52,6 @@ export class WagerSettlementService {
       referenceRetryPolicy: this.referenceRetryPolicy,
     });
 
-    // Ordem importa: a transação existe antes do lançamento que a referencia (FK).
     if (persistence === 'insert') {
       await scope.transactions.insert(transaction);
     } else {
@@ -78,7 +71,6 @@ export class WagerSettlementService {
     await scope.outbox.enqueue(events.map((event) => OutboxMessage.enqueue(event)));
 
     if (transaction.isTerminal()) {
-      // Dependentes que aguardam esta transação são verificadas já, sem esperar o backoff.
       await scope.transactions.wakeDependents(transaction.providerId, transaction.externalTransactionId, now);
     }
     if (outcome.type !== 'pending-reference' || outcome.firstTime) {
@@ -111,7 +103,10 @@ export class WagerSettlementService {
     switch (outcome.type) {
       case 'processed':
         return outcome.ledgerEntry
-          ? [WagerTransactionProcessed.from(transaction, ctx), WalletBalanceChanged.from(wallet, outcome.ledgerEntry, ctx)]
+          ? [
+              WagerTransactionProcessed.from(transaction, ctx),
+              WalletBalanceChanged.from(wallet, outcome.ledgerEntry, ctx),
+            ]
           : [WagerTransactionProcessed.from(transaction, ctx)];
       case 'rejected':
         return [WagerTransactionRejected.from(transaction, ctx)];

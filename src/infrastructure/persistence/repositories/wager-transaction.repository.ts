@@ -1,8 +1,12 @@
 import { LockMode } from '@mikro-orm/core';
 import { EntityManager } from '@mikro-orm/postgresql';
-import { DuplicateTransactionError } from '../../../application/errors';
+import { DuplicateTransactionError, TransactionNotFoundError } from '../../../application/errors';
 import { PendingReferenceCandidate, WagerTransactionRepository } from '../../../application/ports/repositories';
-import { WagerTransaction, WagerTransactionKind, WagerTransactionStatus } from '../../../domain/wagering/wager-transaction';
+import {
+  WagerTransaction,
+  WagerTransactionKind,
+  WagerTransactionStatus,
+} from '../../../domain/wagering/wager-transaction';
 import { constraintOf, isUniqueViolation } from '../database-errors';
 import { WagerTransactionMapper } from '../mappers';
 import { WagerTransactionRecord } from '../records';
@@ -30,7 +34,6 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
       await this.em.insert(WagerTransactionRecord, WagerTransactionMapper.toRecord(transaction, new Date()));
     } catch (error) {
       if (isUniqueViolation(error)) {
-        // idempotency_key, (provider, external id) ou reversão única: outra instância chegou antes.
         throw new DuplicateTransactionError(constraintOf(error));
       }
       throw error;
@@ -45,7 +48,7 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
         WagerTransactionMapper.toStateChange(transaction, new Date()),
       );
       if (affected !== 1) {
-        throw new Error(`Wager transaction ${transaction.id} not found for update`);
+        throw new TransactionNotFoundError(transaction.id);
       }
     } catch (error) {
       if (isUniqueViolation(error)) {
@@ -87,7 +90,6 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
   }
 
   async lockDuePendingReference(id: string, now: Date): Promise<WagerTransaction | null> {
-    // FOR UPDATE SKIP LOCKED: se outra instância já pegou esta linha, pulamos em vez de esperar.
     const record = await this.em.findOne(
       WagerTransactionRecord,
       { id, status: WagerTransactionStatus.PendingReference, nextReferenceCheckAt: { $lte: now } },

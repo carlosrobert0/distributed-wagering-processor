@@ -5,22 +5,12 @@ import {
   ReceiveMessageCommand,
   SendMessageCommand,
 } from '@aws-sdk/client-sqs';
-import {
-  ConflictError,
-  InvalidPayloadError,
-  NotFoundError,
-  TransientInfrastructureError,
-} from '../../application/errors';
 import { AppLogger, Metrics } from '../../application/ports/system';
-import { canonicalJson, sha256Hex } from '../../application/wagering/payload-hash';
-import { ProcessWagerTransactionUseCase } from '../../application/wagering/process-wager-transaction.use-case';
 import { ExponentialBackoff } from '../../domain/shared/exponential-backoff';
 import { SqsQueues } from '../../infrastructure/messaging/sqs';
-import { RequestContextStore } from '../../infrastructure/observability/request-context';
-import { describeZodError, WagerTransactionMessageContract } from '../contracts/wager-transaction.contract';
+import { WagerMessageHandler } from './wager-message.handler';
 
 export interface WagerConsumerOptions {
-  consumerName: string;
   queueName: string;
   dlqName: string;
   waitTimeSeconds: number;
@@ -32,22 +22,12 @@ export interface WagerConsumerOptions {
   faultInjection: 'none' | 'crash-after-commit';
 }
 
-/** Desfecho de uma mensagem — usado em logs e testes. */
-export type MessageDisposition = 'acked' | 'retry-scheduled' | 'dead-lettered' | 'released';
+export type MessageDisposition = 'acked' | 'retry-scheduled' | 'dead-lettered';
 
-/** Classificação de erros (AC-SQS-05). */
-type ErrorClass = 'business' | 'transient' | 'permanent';
+const MAX_VISIBILITY_TIMEOUT_SECONDS = 43_200;
+const POLL_FAILURE_BACKOFF_MS = 1_000;
+const MAX_DEAD_LETTER_REASON_LENGTH = 1_000;
 
-/**
- * Consumer da fila `wager-transactions.fifo` (§10).
- *
- * - Reusa o MESMO use case do HTTP; a inbox é gravada na mesma transação SQL (AC-SQS-02/03).
- * - Ack (`DeleteMessage`) só depois que o use case retorna, ou seja, depois do commit (AC-SQS-04).
- * - Negócio → ack. Transitório → visibilidade com backoff exponencial; quando o
- *   `maxReceiveCount` da redrive policy estoura, o SQS move para a DLQ. Permanente → DLQ já.
- * - Paralelo entre MessageGroups (wallets), sequencial dentro de um grupo.
- * - SIGTERM: para de buscar, termina o que está em andamento e devolve o resto (AC-SQS-07).
- */
 export class WagerTransactionsConsumer {
   private running = false;
   private loop?: Promise<void>;
@@ -57,7 +37,7 @@ export class WagerTransactionsConsumer {
   private maxReceiveCount?: number;
 
   constructor(
-    private readonly processWager: ProcessWagerTransactionUseCase,
+    private readonly handler: WagerMessageHandler,
     private readonly queues: SqsQueues,
     private readonly options: WagerConsumerOptions,
     private readonly metrics: Metrics,
@@ -75,50 +55,52 @@ export class WagerTransactionsConsumer {
     this.logger.info('sqs consumer started', { queue: this.options.queueName });
   }
 
-  /** Graceful shutdown: chamado no SIGTERM (via hook do Nest) e pelos testes. */
   async stop(): Promise<void> {
     if (!this.running) return;
     this.running = false;
     this.pollAbort.abort();
     const drained = Promise.allSettled([...this.inFlight]).then(() => true);
     const timedOut = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), this.options.shutdownGraceMs));
-    const finished = await Promise.race([drained, timedOut]);
-    await this.loop?.catch(() => undefined);
-    this.logger.info('sqs consumer stopped', { drained: finished });
+    const drainedInTime = await Promise.race([drained, timedOut]);
+    if (drainedInTime) {
+      await this.loop?.catch(() => undefined);
+    }
+    this.logger.info('sqs consumer stopped', { drained: drainedInTime });
   }
 
   private async pollLoop(): Promise<void> {
     while (this.running) {
       try {
-        const queueUrl = await this.queues.url(this.options.queueName);
-        if (this.maxReceiveCount === undefined) {
-          this.maxReceiveCount = await this.queues.maxReceiveCount(this.options.queueName).catch(() => undefined);
-        }
-        const response = await this.queues.client.send(
-          new ReceiveMessageCommand({
-            QueueUrl: queueUrl,
-            MaxNumberOfMessages: this.options.batchSize,
-            WaitTimeSeconds: this.options.waitTimeSeconds,
-            VisibilityTimeout: this.options.visibilityTimeoutSeconds,
-            MessageSystemAttributeNames: ['ApproximateReceiveCount', 'MessageGroupId'],
-            AttributeNames: ['All'], // compatibilidade com emuladores que ainda leem o nome antigo
-          }),
-          { abortSignal: this.pollAbort.signal },
-        );
-        const messages = response.Messages ?? [];
-        if (!this.running) {
-          // Chegou depois do SIGTERM: devolve imediatamente para outra instância.
-          await this.releaseAll(queueUrl, messages);
-          break;
-        }
-        if (messages.length > 0) {
-          await this.track(this.processBatch(queueUrl, messages));
-        }
+        await this.pollOnce();
       } catch (error) {
         if (!this.running) break;
-        this.logger.warn('sqs poll failed; backing off', { reason: error instanceof Error ? error.message : String(error) });
-        await sleep(1_000);
+        this.logger.warn('sqs poll failed; backing off', { reason: describe(error) });
+        await sleep(POLL_FAILURE_BACKOFF_MS);
       }
+    }
+  }
+
+  private async pollOnce(): Promise<void> {
+    const queueUrl = await this.queues.url(this.options.queueName);
+    this.maxReceiveCount ??= await this.queues.maxReceiveCount(this.options.queueName).catch(() => undefined);
+    const response = await this.queues.client.send(
+      new ReceiveMessageCommand({
+        QueueUrl: queueUrl,
+        MaxNumberOfMessages: this.options.batchSize,
+        WaitTimeSeconds: this.options.waitTimeSeconds,
+        VisibilityTimeout: this.options.visibilityTimeoutSeconds,
+        MessageSystemAttributeNames: ['ApproximateReceiveCount', 'MessageGroupId'],
+        AttributeNames: ['All'],
+      }),
+      { abortSignal: this.pollAbort.signal },
+    );
+    const messages = response.Messages ?? [];
+    if (!this.running) {
+      await this.releaseAll(queueUrl, messages);
+      return;
+    }
+    if (messages.length > 0) {
+      await this.track(this.processBatch(queueUrl, messages));
     }
   }
 
@@ -131,17 +113,13 @@ export class WagerTransactionsConsumer {
     await Promise.all([...groups.values()].map((group) => this.processGroup(queueUrl, group)));
   }
 
-  /** Sequencial dentro do grupo para respeitar a ordem FIFO por wallet. */
   private async processGroup(queueUrl: string, group: Message[]): Promise<void> {
-    for (let index = 0; index < group.length; index++) {
-      const message = group[index]!;
+    for (const [index, message] of group.entries()) {
       if (!this.running) {
         await this.releaseAll(queueUrl, group.slice(index));
         return;
       }
-      const disposition = await this.handle(queueUrl, message);
-      if (disposition === 'retry-scheduled') {
-        // Mantém a ordem: o resto do grupo volta junto, depois da mensagem que falhou.
+      if ((await this.process(queueUrl, message)) === 'retry-scheduled') {
         const delay = this.retryDelaySeconds(message);
         await Promise.all(group.slice(index + 1).map((rest) => this.changeVisibility(queueUrl, rest, delay)));
         return;
@@ -149,127 +127,63 @@ export class WagerTransactionsConsumer {
     }
   }
 
-  /** Processa uma mensagem e decide ack / retry / DLQ. Público para os testes de integração. */
-  async handle(queueUrl: string, message: Message): Promise<MessageDisposition> {
-    const parsed = this.parse(message);
-    if (!parsed.ok) {
-      return this.deadLetter(queueUrl, message, parsed.reason);
-    }
-    const envelope = parsed.envelope;
-    const correlationId = envelope.correlationId ?? envelope.messageId;
-    const { idempotencyKey, ...business } = envelope.data;
-
-    return RequestContextStore.run({ correlationId, messageId: envelope.messageId }, async () => {
-      try {
-        const result = await this.processWager.execute(
-          { ...business, idempotencyKey },
-          {
-            correlationId,
-            causationId: envelope.messageId,
-            source: 'sqs',
-            inbox: {
-              consumerName: this.options.consumerName,
-              messageId: envelope.messageId,
-              payloadHash: sha256Hex(canonicalJson(envelope.data)),
-            },
-          },
-        );
-        this.injectCrashAfterCommit();
+  private async process(queueUrl: string, message: Message): Promise<MessageDisposition> {
+    const decision = await this.handler.handle(message.Body);
+    switch (decision.action) {
+      case 'ack':
+        if (decision.committed) {
+          this.injectCrashAfterCommit();
+        }
         await this.ack(queueUrl, message);
-        this.logger.info('sqs message processed', {
-          transactionId: result.transactionId,
-          walletId: business.walletId,
-          providerId: business.providerId,
-          status: result.status,
-          idempotentReplay: result.idempotentReplay,
-        });
         return 'acked';
-      } catch (error) {
-        return this.onFailure(queueUrl, message, error, {
-          walletId: business.walletId,
-          providerId: business.providerId,
-        });
-      }
-    });
+      case 'dead-letter':
+        await this.deadLetter(queueUrl, message, decision.reason);
+        return 'dead-lettered';
+      case 'retry':
+        await this.scheduleRetry(queueUrl, message, decision.reason);
+        return 'retry-scheduled';
+    }
   }
 
-  private async onFailure(
-    queueUrl: string,
-    message: Message,
-    error: unknown,
-    fields: { walletId: string; providerId: string },
-  ): Promise<MessageDisposition> {
-    const kind = classify(error);
-    const code = (error as { code?: string }).code;
-
-    if (kind === 'business') {
-      // Terminal: reenviar não muda o resultado (conflito de key, wallet inexistente).
-      this.logger.warn('sqs message rejected by business rule; acking', { ...fields, error: code });
-      await this.ack(queueUrl, message);
-      return 'acked';
-    }
-    if (kind === 'permanent') {
-      return this.deadLetter(queueUrl, message, `${code ?? 'PERMANENT'}: ${(error as Error).message}`);
-    }
-
+  private async scheduleRetry(queueUrl: string, message: Message, reason: string): Promise<void> {
     const receiveCount = receiveCountOf(message);
     const delay = this.retryDelaySeconds(message);
     this.metrics.retry('sqs_consumer');
     if (this.maxReceiveCount !== undefined && receiveCount >= this.maxReceiveCount) {
-      // Na próxima entrega o SQS move para a DLQ pela redrive policy.
       this.metrics.deadLettered('max_receive_count');
     }
     this.logger.warn('sqs message failed transiently; retry scheduled', {
-      ...fields,
-      error: code ?? (error instanceof Error ? error.name : 'unknown'),
+      sqsMessageId: message.MessageId,
+      error: reason,
       receiveCount,
       retryInSeconds: delay,
     });
     await this.changeVisibility(queueUrl, message, delay);
-    return 'retry-scheduled';
   }
 
-  private parse(
-    message: Message,
-  ):
-    | { ok: true; envelope: ReturnType<typeof WagerTransactionMessageContract.parse> }
-    | { ok: false; reason: string } {
-    let json: unknown;
-    try {
-      json = JSON.parse(message.Body ?? '');
-    } catch {
-      return { ok: false, reason: 'MALFORMED_JSON' };
-    }
-    const result = WagerTransactionMessageContract.safeParse(json);
-    if (!result.success) {
-      return { ok: false, reason: `INVALID_ENVELOPE: ${describeZodError(result.error).join('; ')}` };
-    }
-    return { ok: true, envelope: result.data };
-  }
-
-  /** Permanente: copia para a DLQ com o motivo e remove da fila principal. */
-  private async deadLetter(queueUrl: string, message: Message, reason: string): Promise<MessageDisposition> {
-    const dlqUrl = await this.queues.url(this.options.dlqName);
+  private async deadLetter(queueUrl: string, message: Message, reason: string): Promise<void> {
+    const truncatedReason = reason.slice(0, MAX_DEAD_LETTER_REASON_LENGTH);
     await this.queues.client.send(
       new SendMessageCommand({
-        QueueUrl: dlqUrl,
+        QueueUrl: await this.queues.url(this.options.dlqName),
         MessageBody: message.Body ?? '',
         MessageGroupId: message.Attributes?.MessageGroupId ?? 'dead-letter',
         MessageDeduplicationId: message.MessageId ?? `${Date.now()}`,
         MessageAttributes: {
-          deadLetterReason: { DataType: 'String', StringValue: reason.slice(0, 1_000) },
+          deadLetterReason: { DataType: 'String', StringValue: truncatedReason },
           originalMessageId: { DataType: 'String', StringValue: message.MessageId ?? 'unknown' },
         },
       }),
     );
     await this.ack(queueUrl, message);
     this.metrics.deadLettered('permanent');
-    this.logger.error('sqs message moved to DLQ', { sqsMessageId: message.MessageId, reason: reason.slice(0, 200) });
-    return 'dead-lettered';
+    this.logger.error('sqs message moved to DLQ', { sqsMessageId: message.MessageId, reason: truncatedReason });
   }
 
   private async ack(queueUrl: string, message: Message): Promise<void> {
-    await this.queues.client.send(new DeleteMessageCommand({ QueueUrl: queueUrl, ReceiptHandle: message.ReceiptHandle }));
+    await this.queues.client.send(
+      new DeleteMessageCommand({ QueueUrl: queueUrl, ReceiptHandle: message.ReceiptHandle }),
+    );
   }
 
   private async changeVisibility(queueUrl: string, message: Message, seconds: number): Promise<void> {
@@ -282,10 +196,9 @@ export class WagerTransactionsConsumer {
         }),
       );
     } catch (error) {
-      // Se falhar, o visibility timeout padrão devolve a mensagem de qualquer forma.
       this.logger.warn('could not change message visibility', {
         sqsMessageId: message.MessageId,
-        reason: error instanceof Error ? error.message : String(error),
+        reason: describe(error),
       });
     }
   }
@@ -295,7 +208,7 @@ export class WagerTransactionsConsumer {
   }
 
   private retryDelaySeconds(message: Message): number {
-    return Math.min(43_200, Math.round(this.backoff.delayFor(receiveCountOf(message))));
+    return Math.min(MAX_VISIBILITY_TIMEOUT_SECONDS, Math.round(this.backoff.delayFor(receiveCountOf(message))));
   }
 
   private async track<T>(work: Promise<T>): Promise<T> {
@@ -307,26 +220,20 @@ export class WagerTransactionsConsumer {
     }
   }
 
-  /** Teste do cenário 5 da §13: morre depois do commit e antes do ack. Nunca ligado em produção. */
   private injectCrashAfterCommit(): void {
     if (this.options.faultInjection === 'crash-after-commit') {
-      this.logger.warn('FAULT INJECTION: killing process after commit, before ack');
+      this.logger.warn('fault injection: killing process after commit, before ack');
       process.kill(process.pid, 'SIGKILL');
     }
   }
 }
 
-export function classify(error: unknown): ErrorClass {
-  if (error instanceof InvalidPayloadError) return 'permanent';
-  if (error instanceof ConflictError || error instanceof NotFoundError) return 'business';
-  if (error instanceof TransientInfrastructureError) return 'transient';
-  // Desconhecido: tratamos como transitório. Se for um bug determinístico, a redrive policy leva
-  // a mensagem para a DLQ após `maxReceiveCount` tentativas — nada se perde, nada duplica.
-  return 'transient';
-}
-
 function receiveCountOf(message: Message): number {
   return Number(message.Attributes?.ApproximateReceiveCount ?? '1');
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function sleep(ms: number): Promise<void> {

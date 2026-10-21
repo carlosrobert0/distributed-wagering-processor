@@ -17,7 +17,6 @@ export interface WalletState {
   updatedAt: Date;
 }
 
-/** Dados de uma movimentação de saldo; os ids são gerados fora do domínio. */
 export interface BalanceMovement {
   transactionId: string;
   ledgerEntryId: string;
@@ -30,28 +29,17 @@ export interface OpenWalletProps {
   playerId: string;
   initialBalance: Money;
   at: Date;
-  /** Usados somente quando o saldo inicial é positivo (transação OPENING + lançamento CREDIT). */
   openingTransactionId: string;
   openingLedgerEntryId: string;
 }
 
 export interface OpenedWallet {
   wallet: Wallet;
-  /** Presente somente quando o saldo inicial é > 0. */
   openingEntry?: WalletLedgerEntry;
 }
 
 const MAX_PLAYER_ID_LENGTH = 128;
 
-/**
- * Aggregate root da carteira.
- *
- * Invariantes:
- * - saldo nunca negativo;
- * - toda alteração de saldo produz exatamente um `WalletLedgerEntry` (debit/credit o retornam);
- * - moeda da operação == moeda da wallet;
- * - `version` = 1 após a abertura e incrementa somente quando o saldo muda.
- */
 export class Wallet {
   private constructor(
     public readonly id: string,
@@ -93,7 +81,6 @@ export class Wallet {
     return { wallet, openingEntry };
   }
 
-  /** Reconstrução a partir da persistência — não revalida transições. */
   static rehydrate(state: WalletState): Wallet {
     return new Wallet(
       state.id,
@@ -123,7 +110,6 @@ export class Wallet {
     return !this._balance.isLessThan(money);
   }
 
-  /** @throws InsufficientFundsError se o débito deixaria o saldo negativo. */
   debit(movement: BalanceMovement): WalletLedgerEntry {
     if (!this.canDebit(movement.money)) {
       throw new InsufficientFundsError(this.id);
@@ -145,7 +131,6 @@ export class Wallet {
     const balanceAfter =
       direction === LedgerDirection.Credit ? balanceBefore.add(movement.money) : balanceBefore.subtract(movement.money);
 
-    // O lançamento é criado ANTES de mutar o estado: se a aritmética falhar, a wallet fica intacta.
     const entry = WalletLedgerEntry.create({
       id: movement.ledgerEntryId,
       walletId: this.id,

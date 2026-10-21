@@ -1,8 +1,4 @@
 #!/bin/bash
-# Cria as filas FIFO na inicialização do LocalStack (hook ready.d).
-#  - wager-transactions.fifo      comandos de entrada; redrive para a DLQ após 5 recebimentos
-#  - wager-transactions-dlq.fifo  mensagens permanentes ou que esgotaram as tentativas
-#  - wagering-events.fifo         eventos de integração publicados pelo relay da outbox
 set -euo pipefail
 
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"

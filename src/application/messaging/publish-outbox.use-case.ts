@@ -7,16 +7,6 @@ export interface OutboxRelayResult {
   failed: number;
 }
 
-/**
- * Relay da Transactional Outbox (§11).
- *
- * Em uma transação: reivindica um lote com `FOR UPDATE SKIP LOCKED` (publishers concorrentes
- * pegam linhas disjuntas), publica, marca `published_at` ou agenda retry, e faz commit.
- *
- * Garantia: at-least-once. Se o processo morrer depois de publicar e antes do commit, os locks
- * caem, as linhas voltam a ficar disponíveis e outra instância republica com o MESMO eventId —
- * o consumidor deduplica por ele (e a fila FIFO deduplica por `MessageDeduplicationId` em 5 min).
- */
 export class PublishOutboxUseCase {
   constructor(
     private readonly uow: UnitOfWork,
@@ -31,7 +21,6 @@ export class PublishOutboxUseCase {
       const messages = await scope.outbox.claimDue(this.clock.now(), batchSize);
       const summary: OutboxRelayResult = { claimed: messages.length, published: 0, failed: 0 };
 
-      // Sequencial para preservar a ordem de occurred_at dentro de cada partição (wallet).
       for (const message of messages) {
         try {
           await this.publisher.publish(message);
@@ -59,7 +48,6 @@ export class PublishOutboxUseCase {
     return result;
   }
 
-  /** Atualiza as métricas de backlog/lag (consulta barata via índice parcial). */
   async refreshBacklogMetrics(): Promise<void> {
     const stats = await this.uow.run((scope) => scope.outbox.stats());
     const lagSeconds = stats.oldestPendingOccurredAt

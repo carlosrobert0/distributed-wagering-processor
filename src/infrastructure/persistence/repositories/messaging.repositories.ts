@@ -10,8 +10,6 @@ export class MikroOrmInboxRepository implements InboxRepository {
   constructor(private readonly em: EntityManager) {}
 
   async tryReceive(message: InboxMessage): Promise<boolean> {
-    // ON CONFLICT DO NOTHING: se outra instância está inserindo a mesma mensagem, esta espera o
-    // commit dela e então não insere nada — nunca há dois efeitos para o mesmo messageId.
     const rows = await this.em.execute<{ message_id: string }[]>(
       `INSERT INTO inbox_messages (consumer_name, message_id, payload_hash, received_at, processed_at)
        VALUES (?, ?, ?, ?, ?)
@@ -21,7 +19,6 @@ export class MikroOrmInboxRepository implements InboxRepository {
         message.consumerName,
         message.messageId,
         message.payloadHash,
-        // ISO-8601 com fuso explícito: o parâmetro é interpolado como texto em timestamptz.
         message.receivedAt.toISOString(),
         message.processedAt?.toISOString() ?? null,
       ],
@@ -52,7 +49,6 @@ export class MikroOrmOutboxRepository implements OutboxRepository {
   }
 
   async claimDue(now: Date, limit: number): Promise<OutboxMessage[]> {
-    // FOR UPDATE SKIP LOCKED: publishers concorrentes reivindicam lotes disjuntos (AC-OUT-02).
     const records = await this.em.find(
       OutboxMessageRecord,
       { publishedAt: null, nextAttemptAt: { $lte: now } },

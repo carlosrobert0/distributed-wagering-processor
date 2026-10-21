@@ -5,16 +5,13 @@ export interface Clock {
 }
 
 export interface IdGenerator {
-  /** UUID (v7: ordenável no tempo, melhor localidade de índice). */
   next(): string;
 }
 
 export interface EventPublisher {
-  /** Publica no broker. Deve ser idempotente do ponto de vista do consumidor (eventId estável). */
   publish(message: OutboxMessage): Promise<void>;
 }
 
-/** Campos permitidos em log — nunca valores monetários nem payload completo (AC-OBS-02). */
 export interface LogFields {
   correlationId?: string;
   messageId?: string;

@@ -1,7 +1,3 @@
-/**
- * Taxonomia estável de rejeições (legível por máquina). Ver SPEC.md §4.2 para a ação esperada do
- * provedor em cada caso. Os valores são persistidos — nunca renomeie, apenas adicione.
- */
 export enum FailureCode {
   InsufficientFunds = 'INSUFFICIENT_FUNDS',
   ReversalWouldOverdraw = 'REVERSAL_WOULD_OVERDRAW',

@@ -13,7 +13,6 @@ export function assertUuid(field: string, value: unknown): asserts value is stri
   }
 }
 
-/** Converte violações de contrato detectadas pelo domínio em erro de payload da aplicação. */
 export function asPayloadError<T>(build: () => T): T {
   try {
     return build();

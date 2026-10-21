@@ -9,10 +9,6 @@ export interface OrmOptions {
   debug?: boolean;
 }
 
-/**
- * Migrations registradas explicitamente (`migrationsList`) em vez de descobertas por glob:
- * funciona igual no Bun, em testes e no container, sem depender de leitura de diretório.
- */
 export function createOrmConfig(options: OrmOptions) {
   return defineConfig({
     clientUrl: options.url,
@@ -27,7 +23,6 @@ export function createOrmConfig(options: OrmOptions) {
         { name: 'Migration20261021000000_initial_schema', class: Migration20261021000000_initial_schema },
       ],
     },
-    // O schema é dono das migrations; nunca deixe o ORM sincronizar tabelas sozinho.
     ensureDatabase: false,
     allowGlobalContext: false,
     debug: options.debug ?? false,

@@ -33,7 +33,6 @@ export class WalletQueries {
       if (!wallet) {
         throw new WalletNotFoundError(walletId);
       }
-      // Busca 1 a mais para saber se existe próxima página sem um COUNT.
       const entries = await scope.ledger.page(id, afterVersion, limit + 1);
       const page = entries.slice(0, limit);
       const last = page.at(-1);

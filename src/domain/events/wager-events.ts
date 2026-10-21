@@ -39,15 +39,12 @@ function requireDate(value: Date | undefined, field: string): string {
   return value.toISOString();
 }
 
-// ---- WagerTransactionProcessed ------------------------------------------------------------
-
 export interface WagerTransactionProcessedData extends WagerTransactionIdentity {
   referenceTransactionId?: string;
   balanceAfter: MoneyProps;
   processedAt: string;
 }
 
-/** Qualquer transação aplicada, inclusive LOSS e OPENING. */
 export class WagerTransactionProcessed extends IntegrationEvent<WagerTransactionProcessedData> {
   readonly eventType = 'WagerTransactionProcessed';
   readonly version = 1;
@@ -75,8 +72,6 @@ export class WagerTransactionProcessed extends IntegrationEvent<WagerTransaction
     return this.data.walletId;
   }
 }
-
-// ---- WagerTransactionRejected -------------------------------------------------------------
 
 export interface WagerTransactionRejectedData extends WagerTransactionIdentity {
   failureCode: FailureCode;
@@ -114,8 +109,6 @@ export class WagerTransactionRejected extends IntegrationEvent<WagerTransactionR
   }
 }
 
-// ---- WagerTransactionPendingReference -----------------------------------------------------
-
 export interface WagerTransactionPendingReferenceData extends WagerTransactionIdentity {
   referenceExternalTransactionId: string;
   nextCheckAt: string;
@@ -148,8 +141,6 @@ export class WagerTransactionPendingReference extends IntegrationEvent<WagerTran
   }
 }
 
-// ---- WalletBalanceChanged -----------------------------------------------------------------
-
 export interface WalletBalanceChangedData {
   walletId: string;
   transactionId: string;
@@ -160,7 +151,6 @@ export interface WalletBalanceChangedData {
   walletVersion: number;
 }
 
-/** Somente quando o saldo muda (nunca para LOSS nem REJECTED). */
 export class WalletBalanceChanged extends IntegrationEvent<WalletBalanceChangedData> {
   readonly eventType = 'WalletBalanceChanged';
   readonly version = 1;

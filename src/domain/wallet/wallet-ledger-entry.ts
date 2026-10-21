@@ -10,7 +10,6 @@ export interface LedgerEntryState {
   id: string;
   walletId: string;
   transactionId: string;
-  /** Versão da wallet produzida por este lançamento (1 = abertura). Única por wallet. */
   walletVersion: number;
   direction: LedgerDirection;
   money: Money;
@@ -21,12 +20,6 @@ export interface LedgerEntryState {
 
 export type CreateLedgerEntryProps = LedgerEntryState;
 
-/**
- * Lançamento imutável do ledger.
- *
- * A imutabilidade é estrutural: todos os campos são `readonly`, a instância é congelada e não
- * existem métodos de transição. No banco, triggers bloqueiam UPDATE/DELETE/TRUNCATE.
- */
 export class WalletLedgerEntry {
   private constructor(
     public readonly id: string,
@@ -42,7 +35,6 @@ export class WalletLedgerEntry {
     Object.freeze(this);
   }
 
-  /** Valida a aritmética do lançamento: balanceBefore ± money === balanceAfter. */
   static create(props: CreateLedgerEntryProps): WalletLedgerEntry {
     if (!props.money.isPositive()) {
       throw new InvariantViolationError('Ledger entry amount must be positive');
@@ -76,7 +68,6 @@ export class WalletLedgerEntry {
     );
   }
 
-  /** Efeito do lançamento no saldo, com sinal (crédito positivo, débito negativo). */
   signedAmount(): Money {
     return this.direction === LedgerDirection.Credit ? this.money : this.money.negate();
   }

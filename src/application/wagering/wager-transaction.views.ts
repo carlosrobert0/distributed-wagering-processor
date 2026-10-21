@@ -2,12 +2,10 @@ import { MoneyProps } from '../../domain/shared/money';
 import { FailureCode } from '../../domain/wagering/failure-code';
 import { WagerTransaction, WagerTransactionStatus } from '../../domain/wagering/wager-transaction';
 
-/** Resposta de submissão (POST /wagering/transactions e consumo SQS). */
 export interface WagerTransactionResult {
   transactionId: string;
   status: WagerTransactionStatus;
   failureCode?: FailureCode;
-  /** Saldo observado no momento da decisão (ausente enquanto PENDING_REFERENCE). */
   balance?: MoneyProps;
   idempotentReplay: boolean;
 }
@@ -22,7 +20,6 @@ export function toResult(transaction: WagerTransaction, idempotentReplay: boolea
   };
 }
 
-/** Representação completa para consultas. */
 export interface WagerTransactionView {
   transactionId: string;
   providerId: string;

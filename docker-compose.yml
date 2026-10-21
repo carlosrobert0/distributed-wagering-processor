@@ -1,8 +1,3 @@
-# Ambiente local completo: Postgres, LocalStack (SQS), migrations e 3 instâncias da aplicação.
-#
-#   docker compose up -d postgres localstack   # só as dependências (para rodar testes no host)
-#   docker compose up -d --build               # tudo, com app-1/app-2/app-3 em :3001/:3002/:3003
-
 x-app: &app
   build: .
   restart: unless-stopped
@@ -19,7 +14,6 @@ x-app: &app
       condition: service_completed_successfully
     localstack:
       condition: service_healthy
-  # SIGTERM → drena consumer e workers; dá tempo para o grace period do consumer.
   stop_grace_period: 30s
   healthcheck:
     test: ["CMD", "bun", "-e", "fetch('http://localhost:3000/health/ready').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
@@ -44,7 +38,6 @@ services:
       retries: 30
 
   localstack:
-    # Imagem community fixada (versões recentes podem exigir token). Alternativa: MiniStack.
     image: localstack/localstack:4.4
     environment:
       SERVICES: sqs
@@ -55,7 +48,6 @@ services:
     volumes:
       - ./docker/localstack/init-sqs.sh:/etc/localstack/init/ready.d/init-sqs.sh:ro
     healthcheck:
-      # "ready" só depois que o script de init criou as filas.
       test: ["CMD-SHELL", "curl -fs http://localhost:4566/_localstack/init/ready | grep -q '\"completed\": true'"]
       interval: 2s
       timeout: 3s

@@ -15,18 +15,10 @@ export interface OutboxMessageState {
   lastError?: string;
 }
 
-/**
- * Backoff de publicação (INT-08): 1s · 2ⁿ com teto de 5 min e sem limite de tentativas — um evento
- * confirmado nunca é descartado; o atraso aparece na métrica `outbox_lag_seconds`.
- */
 export const OUTBOX_RETRY_POLICY = new ExponentialBackoff(1_000, 300_000);
 
 const MAX_ERROR_LENGTH = 500;
 
-/**
- * Evento gravado na mesma transação SQL do efeito financeiro e publicado depois do commit por
- * um relay. `id` = `eventId`, que é estável entre republicações e serve de chave de deduplicação.
- */
 export class OutboxMessage {
   private constructor(
     public readonly id: string,
@@ -104,7 +96,6 @@ export class OutboxMessage {
     this._lastError = undefined;
   }
 
-  /** Incrementa `attempts` e calcula o próximo `nextAttemptAt` (backoff). */
   scheduleRetry(now: Date, reason?: string): void {
     if (!this.isPending()) {
       throw new InvalidTransactionStateError(this.id, 'PUBLISHED', 'RETRY');

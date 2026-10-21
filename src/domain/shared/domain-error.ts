@@ -1,10 +1,3 @@
-/**
- * Erros do domínio.
- *
- * - `DomainValidationError`: entrada que viola o contrato (payload inválido). A borda traduz para 400.
- * - `BusinessRuleViolationError`: regra de negócio violada por uma operação válida em forma.
- * - `InvariantViolationError`: erro de programação ou dado corrompido — nunca deveria acontecer.
- */
 export abstract class DomainError extends Error {
   abstract readonly code: string;
 
@@ -66,7 +59,6 @@ export class InvariantViolationError extends DomainError {
   }
 }
 
-/** Tentativa de transicionar uma transação a partir de um estado que não permite a transição. */
 export class InvalidTransactionStateError extends DomainError {
   readonly code = 'INVALID_TRANSACTION_STATE';
 

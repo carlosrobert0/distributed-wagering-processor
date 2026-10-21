@@ -1,26 +1,9 @@
 import { Migration } from '@mikro-orm/migrations';
 
-/**
- * Schema inicial. As garantias de unicidade, imutabilidade e não-negatividade vivem AQUI
- * (restrição inviolável 9), não só no código: mesmo um bug na aplicação ou um UPDATE manual
- * não consegue deixar saldo negativo, duplicar lançamento ou reescrever o ledger.
- *
- * Mapa de garantias → objetos de banco:
- * - saldo nunca negativo ............ wallets_balance_non_negative_ck, ledger_balances_non_negative_ck
- * - 1 wallet por player+moeda ....... wallets_player_currency_uq
- * - idempotência .................... wager_tx_idempotency_key_uq, wager_tx_provider_external_uq
- * - reversão única .................. wager_tx_single_reversal_uq (índice único parcial)
- * - 1 lançamento por transação ...... ledger_transaction_wallet_uq
- * - sem lost update ................. ledger_wallet_version_uq + encadeamento (ledger_validate_entry)
- * - ledger imutável ................. ledger_append_only / ledger_no_truncate
- * - transação terminal imutável ..... wager_tx_guard
- * - saldo == ledger ................. constraint triggers diferidas (*_matches_*_ctr), checadas no COMMIT
- */
 export class Migration20261021000000_initial_schema extends Migration {
   override name = 'Migration20261021000000_initial_schema';
 
   override async up(): Promise<void> {
-    // ---------------------------------------------------------------- funções utilitárias
     this.addSql(`
       CREATE FUNCTION reject_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN
@@ -30,7 +13,6 @@ export class Migration20261021000000_initial_schema extends Migration {
       $$;
     `);
 
-    // ---------------------------------------------------------------- wallets
     this.addSql(`
       CREATE TABLE wallets (
         id          uuid           PRIMARY KEY,
@@ -56,7 +38,6 @@ export class Migration20261021000000_initial_schema extends Migration {
         FOR EACH STATEMENT EXECUTE FUNCTION reject_mutation();
     `);
 
-    // ---------------------------------------------------------------- wager_transactions
     this.addSql(`
       CREATE TABLE wager_transactions (
         id                                 uuid          PRIMARY KEY,
@@ -88,21 +69,17 @@ export class Migration20261021000000_initial_schema extends Migration {
         CONSTRAINT wager_tx_kind_ck   CHECK (kind IN ('OPENING','BET','WIN','LOSS','REFUND','ROLLBACK')),
         CONSTRAINT wager_tx_status_ck CHECK (status IN ('PENDING','PENDING_REFERENCE','PROCESSED','REJECTED','FAILED')),
         CONSTRAINT wager_tx_currency_ck CHECK (currency ~ '^[A-Z]{3}$'),
-        -- INT-02: somente LOSS pode ter valor zero
         CONSTRAINT wager_tx_amount_ck CHECK (amount > 0 OR (kind = 'LOSS' AND amount = 0)),
-        -- AC-TX-04 / INT-03: implicação (REFUND/ROLLBACK ⇒ referência), não equivalência
         CONSTRAINT wager_tx_reversal_requires_reference_ck
           CHECK (kind NOT IN ('REFUND','ROLLBACK') OR reference_external_transaction_id IS NOT NULL),
         CONSTRAINT wager_tx_no_reference_ck
           CHECK (kind NOT IN ('BET','OPENING') OR reference_external_transaction_id IS NULL),
-        -- processada com referência ⇒ referência resolvida
         CONSTRAINT wager_tx_reference_resolved_ck
           CHECK (status <> 'PROCESSED' OR reference_external_transaction_id IS NULL OR reference_transaction_id IS NOT NULL),
         CONSTRAINT wager_tx_failure_code_ck
           CHECK ((status IN ('REJECTED','FAILED')) = (failure_code IS NOT NULL)),
         CONSTRAINT wager_tx_terminal_timestamp_ck
           CHECK ((status IN ('PROCESSED','REJECTED','FAILED')) = (processed_at IS NOT NULL)),
-        -- replay devolve o saldo observado na decisão (regra 7)
         CONSTRAINT wager_tx_observed_balance_ck
           CHECK ((status IN ('PROCESSED','REJECTED')) = (balance_after IS NOT NULL)),
         CONSTRAINT wager_tx_observed_balance_non_negative_ck CHECK (balance_after >= 0),
@@ -112,26 +89,24 @@ export class Migration20261021000000_initial_schema extends Migration {
         CONSTRAINT wager_tx_opening_internal_ck CHECK ((kind = 'OPENING') = (provider_id = 'internal'))
       );
     `);
-    // AC-TX-07 / INT-05: uma referência é revertida (REFUND ou ROLLBACK) no máximo uma vez.
     this.addSql(`
       CREATE UNIQUE INDEX wager_tx_single_reversal_uq ON wager_transactions (reference_transaction_id)
         WHERE kind IN ('REFUND','ROLLBACK') AND status = 'PROCESSED';
     `);
-    // Worker de PENDING_REFERENCE: só as linhas pendentes entram no índice.
     this.addSql(`
       CREATE INDEX wager_tx_pending_reference_due_ix ON wager_transactions (next_reference_check_at)
         WHERE status = 'PENDING_REFERENCE';
     `);
-    // "Acordar" dependentes quando a referência chega.
     this.addSql(`
       CREATE INDEX wager_tx_waiting_on_reference_ix
         ON wager_transactions (provider_id, reference_external_transaction_id)
         WHERE status = 'PENDING_REFERENCE';
     `);
     this.addSql(`CREATE INDEX wager_tx_wallet_created_ix ON wager_transactions (wallet_id, created_at);`);
-    this.addSql(`CREATE INDEX wager_tx_reference_ix ON wager_transactions (reference_transaction_id) WHERE reference_transaction_id IS NOT NULL;`);
+    this.addSql(
+      `CREATE INDEX wager_tx_reference_ix ON wager_transactions (reference_transaction_id) WHERE reference_transaction_id IS NOT NULL;`,
+    );
 
-    // Transação terminal é imutável; campos de identidade/negócio nunca mudam; sem DELETE.
     this.addSql(`
       CREATE FUNCTION wager_tx_guard() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN
@@ -165,7 +140,6 @@ export class Migration20261021000000_initial_schema extends Migration {
         FOR EACH STATEMENT EXECUTE FUNCTION reject_mutation();
     `);
 
-    // ---------------------------------------------------------------- wallet_ledger_entries
     this.addSql(`
       CREATE TABLE wallet_ledger_entries (
         id              uuid          PRIMARY KEY,
@@ -178,7 +152,6 @@ export class Migration20261021000000_initial_schema extends Migration {
         balance_before  numeric(20,2) NOT NULL,
         balance_after   numeric(20,2) NOT NULL,
         created_at      timestamptz   NOT NULL,
-        -- FK composta: o lançamento só pode existir na moeda da wallet
         CONSTRAINT ledger_wallet_currency_fk FOREIGN KEY (wallet_id, currency) REFERENCES wallets (id, currency),
         CONSTRAINT ledger_transaction_wallet_uq UNIQUE (transaction_id, wallet_id),
         CONSTRAINT ledger_wallet_version_uq     UNIQUE (wallet_id, wallet_version),
@@ -199,7 +172,6 @@ export class Migration20261021000000_initial_schema extends Migration {
         FOR EACH STATEMENT EXECUTE FUNCTION reject_mutation();
     `);
 
-    // Encadeamento: version(n) = version(n−1)+1 e before(n) = after(n−1); bate com a transação.
     this.addSql(`
       CREATE FUNCTION ledger_validate_entry() RETURNS trigger LANGUAGE plpgsql AS $$
       DECLARE
@@ -239,8 +211,6 @@ export class Migration20261021000000_initial_schema extends Migration {
         FOR EACH ROW EXECUTE FUNCTION ledger_validate_entry();
     `);
 
-    // Saldo materializado == último lançamento (INV-08), verificado no COMMIT (deferido): dentro da
-    // transação a ordem dos comandos é livre, mas nada inconsistente consegue ser confirmado.
     this.addSql(`
       CREATE FUNCTION assert_wallet_matches_ledger(target uuid) RETURNS void LANGUAGE plpgsql AS $$
       DECLARE
@@ -296,7 +266,6 @@ export class Migration20261021000000_initial_schema extends Migration {
         FOR EACH ROW EXECUTE FUNCTION ledger_matches_wallet_trg();
     `);
 
-    // ---------------------------------------------------------------- inbox_messages
     this.addSql(`
       CREATE TABLE inbox_messages (
         consumer_name  varchar(128) NOT NULL,
@@ -308,7 +277,6 @@ export class Migration20261021000000_initial_schema extends Migration {
       );
     `);
 
-    // ---------------------------------------------------------------- outbox_messages
     this.addSql(`
       CREATE TABLE outbox_messages (
         id               uuid         PRIMARY KEY,
@@ -328,7 +296,6 @@ export class Migration20261021000000_initial_schema extends Migration {
     this.addSql(`
       CREATE INDEX outbox_due_ix ON outbox_messages (next_attempt_at, occurred_at) WHERE published_at IS NULL;
     `);
-    // O evento em si é imutável; só os campos de controle de publicação mudam, e nunca "despublicam".
     this.addSql(`
       CREATE FUNCTION outbox_guard() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN

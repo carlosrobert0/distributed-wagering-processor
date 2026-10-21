@@ -1,13 +1,5 @@
 import { EntitySchema } from '@mikro-orm/core';
 
-/**
- * Modelos de persistência (data mappers), separados das entidades de domínio.
- *
- * Mapeados com `EntitySchema` — sem decorators — para que o domínio não conheça o ORM e para
- * evitar dependência de `emitDecoratorMetadata` no MikroORM. Valores monetários são `string`
- * (NUMERIC chega do driver `pg` como texto exato) e só viram `Money` nos mappers.
- */
-
 export class WalletRecord {
   id!: string;
   playerId!: string;

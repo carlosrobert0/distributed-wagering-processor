@@ -7,7 +7,6 @@ export class SystemClock implements Clock {
   }
 }
 
-/** UUIDv7: ordenável no tempo → inserts sequenciais no índice B-tree da PK. */
 export class UuidV7Generator implements IdGenerator {
   next(): string {
     return uuidv7();

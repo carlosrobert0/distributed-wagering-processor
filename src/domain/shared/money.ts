@@ -1,6 +1,5 @@
 import { CurrencyMismatchError, InvalidMoneyError } from './domain-error';
 
-/** Contrato de entrada/saída: valor sempre como string decimal com 2 casas. */
 export interface MoneyProps {
   amount: string;
   currency: string;
@@ -8,20 +7,11 @@ export interface MoneyProps {
 
 const SCALE = 2;
 const CENTS_PER_UNIT = 100n;
-/** NUMERIC(20,2) comporta 18 dígitos inteiros; o domínio recusa qualquer valor fora disso. */
 const MAX_ABSOLUTE_CENTS = 10n ** 20n - 1n;
-/** Sem sinal, sem zeros à esquerda, exatamente 2 casas: rejeita NaN, Infinity, 1e3, "", "1.0", "1.001", "-1.00". */
 const CONTRACT_AMOUNT = /^(0|[1-9]\d{0,17})\.\d{2}$/;
-/** Valores vindos de fonte confiável (banco, somas) podem ser negativos — ex.: diferença de reconciliação. */
 const PERSISTED_AMOUNT = /^-?(0|[1-9]\d{0,17})\.\d{2}$/;
 const CURRENCY = /^[A-Z]{3}$/;
 
-/**
- * Valor monetário exato e imutável.
- *
- * Internamente usa `bigint` em centavos (unidade mínima, escala fixa 2). Como o domínio só soma e
- * subtrai, nunca há arredondamento: entradas com mais de 2 casas são rejeitadas, não arredondadas.
- */
 export class Money {
   private constructor(
     private readonly cents: bigint,
@@ -33,7 +23,6 @@ export class Money {
     Object.freeze(this);
   }
 
-  /** Factory de contrato (API/fila): só aceita valores não negativos no formato canônico. */
   static from(props: MoneyProps): Money {
     Money.assertCurrency(props?.currency);
     if (typeof props.amount !== 'string' || !CONTRACT_AMOUNT.test(props.amount)) {
@@ -44,7 +33,6 @@ export class Money {
     return new Money(Money.parseCents(props.amount), props.currency);
   }
 
-  /** Reidratação a partir de fonte confiável (banco). Aceita sinal negativo; formato continua estrito. */
   static rehydrate(props: MoneyProps): Money {
     Money.assertCurrency(props?.currency);
     if (typeof props.amount !== 'string' || !PERSISTED_AMOUNT.test(props.amount)) {
@@ -120,7 +108,6 @@ export class Money {
   }
 
   private static parseCents(amount: string): bigint {
-    // O regex já garantiu o formato; remover o ponto dá exatamente o valor em centavos.
     return BigInt(amount.replace('.', ''));
   }
 

@@ -15,11 +15,6 @@ export interface CreateWalletCommand {
   initialBalance: MoneyProps;
 }
 
-/**
- * Abre a wallet e, se houver saldo inicial, cria a transação interna OPENING e o lançamento
- * CREDIT correspondente na MESMA transação SQL (AC-WAL-06). Duplicidade (playerId, currency)
- * é barrada pelo UNIQUE do banco e devolvida como conflito (AC-WAL-01).
- */
 export class CreateWalletUseCase {
   constructor(
     private readonly uow: UnitOfWork,
@@ -53,7 +48,12 @@ export class CreateWalletUseCase {
           playerId: wallet.playerId,
           money: initialBalance,
           payloadHash: sha256Hex(
-            canonicalJson({ kind: 'OPENING', walletId: wallet.id, playerId: wallet.playerId, money: initialBalance.toJSON() }),
+            canonicalJson({
+              kind: 'OPENING',
+              walletId: wallet.id,
+              playerId: wallet.playerId,
+              money: initialBalance.toJSON(),
+            }),
           ),
           createdAt: now,
         });

@@ -1,6 +1,12 @@
 import { InboxMessage } from '../../domain/messaging/inbox-message';
 import { Money } from '../../domain/shared/money';
-import { WagerTransaction, WagerTransactionKind } from '../../domain/wagering/wager-transaction';
+import {
+  isSubmittableKind,
+  SUBMITTABLE_KINDS,
+  WagerTransaction,
+  WagerTransactionKind,
+} from '../../domain/wagering/wager-transaction';
+import { Wallet } from '../../domain/wallet/wallet';
 import {
   DuplicateTransactionError,
   ExternalTransactionConflictError,
@@ -12,15 +18,13 @@ import { AppLogger, Clock, IdGenerator, Metrics, ProcessingSource } from '../por
 import { TransactionScope, UnitOfWork } from '../ports/unit-of-work';
 import { asPayloadError, assertUuid } from '../validation';
 import { computeWagerPayloadHash, WagerBusinessFields } from './payload-hash';
-import { toResult, WagerTransactionResult } from './wager-transaction.views';
 import { WagerSettlementService } from './wager-settlement.service';
+import { toResult, WagerTransactionResult } from './wager-transaction.views';
 
 export interface SubmitWagerTransactionCommand extends WagerBusinessFields {
-  /** Fonte da verdade da idempotência (header HTTP ou campo da mensagem). */
   idempotencyKey: string;
 }
 
-/** Presente quando a entrada é a fila: registro de inbox gravado na mesma transação SQL. */
 export interface InboxReceipt {
   consumerName: string;
   messageId: string;
@@ -34,17 +38,8 @@ export interface ProcessingContext {
   inbox?: InboxReceipt;
 }
 
-/** Corridas de unicidade se resolvem na 2ª tentativa (que encontra a transação vencedora). */
-const MAX_RACE_ATTEMPTS = 3;
+export const MAX_RACE_ATTEMPTS = 3;
 
-/**
- * ÚNICO use case de submissão — usado pelo controller HTTP e pelo consumer SQS (AC-SQS-02).
- *
- * Fluxo (uma transação SQL):
- *   1. inbox (se SQS)  →  2. lock da wallet (FOR UPDATE)  →  3. idempotência (replay/conflito)
- *   →  4. liquidação (domínio)  →  5. transação + ledger + saldo + outbox  →  commit.
- * O replay rápido (passo 0, sem lock) evita que duplicatas façam fila no lock de uma hot wallet.
- */
 export class ProcessWagerTransactionUseCase {
   constructor(
     private readonly uow: UnitOfWork,
@@ -58,35 +53,41 @@ export class ProcessWagerTransactionUseCase {
   async execute(command: SubmitWagerTransactionCommand, ctx: ProcessingContext): Promise<WagerTransactionResult> {
     const startedAt = performance.now();
     try {
-      // Valida a forma uma vez, antes de tocar no banco: payload inválido nunca abre transação.
-      const probe = this.buildDraft(command);
-
-      const fastReplay = await this.uow.run(async (scope) => {
-        // Redelivery da fila: a inbox (consumerName, messageId) reconhece a mensagem já processada.
-        if (ctx.inbox && (await scope.inbox.find(ctx.inbox.consumerName, ctx.inbox.messageId))) {
-          this.metrics.duplicateDetected('inbox_duplicate');
-        }
-        return this.findExisting(scope, probe);
-      });
-      if (fastReplay) {
-        return this.replay(fastReplay, probe);
-      }
-
-      for (let attempt = 1; ; attempt++) {
-        try {
-          return await this.uow.run((scope) => this.process(scope, this.buildDraft(command), ctx));
-        } catch (error) {
-          if (!(error instanceof DuplicateTransactionError) || attempt >= MAX_RACE_ATTEMPTS) {
-            throw error;
-          }
-          // Outra instância inseriu a mesma transação entre o nosso lock e o insert (ex.: mesma key
-          // apontando para wallets diferentes). A próxima tentativa verá a vencedora e fará replay.
-          this.metrics.lockConflict('unique_race');
-          this.metrics.retry('race');
-        }
-      }
+      const draft = this.buildDraft(command);
+      const replay = await this.replayWithoutLock(draft, ctx);
+      return replay ?? (await this.processResolvingRaces(command, ctx));
     } finally {
       this.metrics.observeProcessingLatency(ctx.source, (performance.now() - startedAt) / 1000);
+    }
+  }
+
+  private async replayWithoutLock(
+    draft: WagerTransaction,
+    ctx: ProcessingContext,
+  ): Promise<WagerTransactionResult | undefined> {
+    const existing = await this.uow.run(async (scope) => {
+      if (ctx.inbox && (await scope.inbox.find(ctx.inbox.consumerName, ctx.inbox.messageId))) {
+        this.metrics.duplicateDetected('inbox_duplicate');
+      }
+      return this.findExisting(scope, draft);
+    });
+    return existing ? this.replay(existing, draft) : undefined;
+  }
+
+  private async processResolvingRaces(
+    command: SubmitWagerTransactionCommand,
+    ctx: ProcessingContext,
+  ): Promise<WagerTransactionResult> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.uow.run((scope) => this.process(scope, this.buildDraft(command), ctx));
+      } catch (error) {
+        if (!(error instanceof DuplicateTransactionError) || attempt >= MAX_RACE_ATTEMPTS) {
+          throw error;
+        }
+        this.metrics.lockConflict('unique_race');
+        this.metrics.retry('race');
+      }
     }
   }
 
@@ -95,32 +96,16 @@ export class ProcessWagerTransactionUseCase {
     draft: WagerTransaction,
     ctx: ProcessingContext,
   ): Promise<WagerTransactionResult> {
-    const now = this.clock.now();
-
     if (ctx.inbox) {
-      const inbox = InboxMessage.receive({ ...ctx.inbox, receivedAt: now });
-      inbox.markProcessed(now);
-      const fresh = await scope.inbox.tryReceive(inbox);
-      if (!fresh) {
-        this.metrics.duplicateDetected('inbox_duplicate');
-      }
+      await this.receiveInbox(scope, ctx.inbox);
     }
-
-    const lockStartedAt = performance.now();
-    const wallet = await scope.wallets.findByIdForUpdate(draft.walletId);
-    this.metrics.observeLockWait((performance.now() - lockStartedAt) / 1000);
-    if (!wallet) {
-      throw new WalletNotFoundError(draft.walletId);
-    }
-
-    // Com a wallet travada, nenhuma outra escrita na mesma wallet acontece: a checagem é decisiva.
+    const wallet = await this.lockWallet(scope, draft.walletId);
     const existing = await this.findExisting(scope, draft);
     if (existing) {
       return this.replay(existing, draft);
     }
 
     const outcome = await this.settlement.settle(scope, wallet, draft, ctx, 'insert');
-
     this.logger.info('wager transaction settled', {
       correlationId: ctx.correlationId,
       messageId: ctx.inbox?.messageId,
@@ -135,6 +120,25 @@ export class ProcessWagerTransactionUseCase {
     return toResult(draft, false);
   }
 
+  private async receiveInbox(scope: TransactionScope, receipt: InboxReceipt): Promise<void> {
+    const now = this.clock.now();
+    const inbox = InboxMessage.receive({ ...receipt, receivedAt: now });
+    inbox.markProcessed(now);
+    if (!(await scope.inbox.tryReceive(inbox))) {
+      this.metrics.duplicateDetected('inbox_duplicate');
+    }
+  }
+
+  private async lockWallet(scope: TransactionScope, walletId: string): Promise<Wallet> {
+    const startedAt = performance.now();
+    const wallet = await scope.wallets.findByIdForUpdate(walletId);
+    this.metrics.observeLockWait((performance.now() - startedAt) / 1000);
+    if (!wallet) {
+      throw new WalletNotFoundError(walletId);
+    }
+    return wallet;
+  }
+
   private async findExisting(scope: TransactionScope, draft: WagerTransaction): Promise<WagerTransaction | null> {
     return (
       (await scope.transactions.findByIdempotencyKey(draft.idempotencyKey)) ??
@@ -142,7 +146,6 @@ export class ProcessWagerTransactionUseCase {
     );
   }
 
-  /** Mesma key + mesmo payload → resultado original. Qualquer divergência → conflito, nunca replay. */
   private replay(existing: WagerTransaction, draft: WagerTransaction): WagerTransactionResult {
     if (existing.idempotencyKey !== draft.idempotencyKey) {
       this.metrics.duplicateDetected('idempotency_conflict');
@@ -180,17 +183,9 @@ export class ProcessWagerTransactionUseCase {
   }
 }
 
-const SUBMITTABLE = new Set<string>([
-  WagerTransactionKind.Bet,
-  WagerTransactionKind.Win,
-  WagerTransactionKind.Loss,
-  WagerTransactionKind.Refund,
-  WagerTransactionKind.Rollback,
-]);
-
 function parseSubmittableKind(kind: string): WagerTransactionKind {
-  if (!SUBMITTABLE.has(kind)) {
-    throw new InvalidPayloadError(`kind must be one of ${[...SUBMITTABLE].join(', ')}`, [`kind: "${kind}"`]);
+  if (!isSubmittableKind(kind)) {
+    throw new InvalidPayloadError(`kind must be one of ${SUBMITTABLE_KINDS.join(', ')}`, [`kind: "${kind}"`]);
   }
-  return kind as WagerTransactionKind;
+  return kind;
 }

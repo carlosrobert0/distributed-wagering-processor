@@ -3,13 +3,6 @@ import pino, { Logger } from 'pino';
 import { AppLogger, LogFields } from '../../application/ports/system';
 import { RequestContextStore } from './request-context';
 
-/**
- * Logger JSON estruturado (AC-OBS-01/02).
- *
- * - `correlationId`/`messageId` entram automaticamente via AsyncLocalStorage (mixin);
- * - campos sensíveis são removidos por `redact` como segunda barreira — a primeira é a porta
- *   `LogFields`, que não aceita objetos (logo, nenhum payload/Money completo chega aqui).
- */
 export function createPinoLogger(options: { level: string; instanceId: string }): Logger {
   return pino({
     level: options.level,
@@ -22,7 +15,17 @@ export function createPinoLogger(options: { level: string; instanceId: string })
       return context ? { correlationId: context.correlationId, messageId: context.messageId } : {};
     },
     redact: {
-      paths: ['amount', 'money', 'balance', 'balanceAfter', 'balanceBefore', 'payload', '*.amount', '*.payload', 'authorization'],
+      paths: [
+        'amount',
+        'money',
+        'balance',
+        'balanceAfter',
+        'balanceBefore',
+        'payload',
+        '*.amount',
+        '*.payload',
+        'authorization',
+      ],
       censor: '[REDACTED]',
     },
   });
@@ -48,7 +51,6 @@ export class PinoAppLogger implements AppLogger {
   }
 }
 
-/** Adaptador para o logger interno do Nest (bootstrap, rotas), mantendo JSON. */
 export class PinoNestLogger implements LoggerService {
   constructor(private readonly logger: Logger) {}
 

@@ -1,5 +1,6 @@
 import { InboxMessage } from '../../domain/messaging/inbox-message';
 import { OutboxMessage } from '../../domain/messaging/outbox-message';
+import { InvariantViolationError } from '../../domain/shared/domain-error';
 import { Money } from '../../domain/shared/money';
 import { FailureCode, isFailureCode } from '../../domain/wagering/failure-code';
 import {
@@ -16,11 +17,6 @@ import {
   WagerTransactionRecord,
   WalletRecord,
 } from './records';
-
-/**
- * Tradução record ⇄ domínio. `toDomain` usa sempre `rehydrate` (não revalida transições, §6.0);
- * `Money.rehydrate` mantém a validação de formato, então um valor corrompido no banco falha alto.
- */
 
 const money = (amount: string, currency: string): Money => Money.rehydrate({ amount, currency: currency.trim() });
 
@@ -54,7 +50,7 @@ export const WagerTransactionMapper = {
   toDomain(record: WagerTransactionRecord): WagerTransaction {
     const failureCode = record.failureCode ?? undefined;
     if (failureCode !== undefined && !isFailureCode(failureCode)) {
-      throw new Error(`Unknown failure code persisted: ${failureCode}`);
+      throw new InvariantViolationError(`Unknown failure code persisted: ${failureCode}`);
     }
     return WagerTransaction.rehydrate({
       id: record.id,
@@ -80,7 +76,6 @@ export const WagerTransactionMapper = {
     });
   },
 
-  /** Somente os campos que mudam ao longo da vida da transação (o trigger barra o resto). */
   toStateChange(transaction: WagerTransaction, now: Date): Partial<WagerTransactionRecord> {
     return {
       status: transaction.status,

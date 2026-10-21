@@ -7,7 +7,6 @@ import { isUniqueViolation } from '../database-errors';
 import { WalletMapper } from '../mappers';
 import { WalletRecord } from '../records';
 
-/** Records são convertidos em domínio na hora; o identity map não agrega nada e poderia servir dado velho. */
 const FRESH = { disableIdentityMap: true } as const;
 
 export class MikroOrmWalletRepository implements WalletRepository {
@@ -19,13 +18,11 @@ export class MikroOrmWalletRepository implements WalletRepository {
   }
 
   async findByIdForUpdate(id: string): Promise<Wallet | null> {
-    // SELECT … FOR UPDATE: lock de LINHA, por wallet (sem lock global — restrição 6).
     const record = await this.em.findOne(WalletRecord, { id }, { ...FRESH, lockMode: LockMode.PESSIMISTIC_WRITE });
     return record ? WalletMapper.toDomain(record) : null;
   }
 
   async findByIdForShare(id: string): Promise<Wallet | null> {
-    // SELECT … FOR SHARE: leitores convivem; escritores esperam.
     const record = await this.em.findOne(WalletRecord, { id }, { ...FRESH, lockMode: LockMode.PESSIMISTIC_READ });
     return record ? WalletMapper.toDomain(record) : null;
   }
@@ -42,7 +39,6 @@ export class MikroOrmWalletRepository implements WalletRepository {
   }
 
   async saveBalance(wallet: Wallet, expectedVersion: number): Promise<void> {
-    // UPDATE condicionado à versão: defesa em profundidade sobre o FOR UPDATE.
     const affected = await this.em.nativeUpdate(
       WalletRecord,
       { id: wallet.id, version: expectedVersion },

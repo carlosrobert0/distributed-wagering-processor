@@ -3,19 +3,12 @@ import type { Response } from 'express';
 import { InvalidPayloadError } from '../../application/errors';
 import { ProcessWagerTransactionUseCase } from '../../application/wagering/process-wager-transaction.use-case';
 import { WagerTransactionQueries } from '../../application/wagering/wager-transaction.queries';
-import {
-  WagerTransactionResult,
-  WagerTransactionView,
-} from '../../application/wagering/wager-transaction.views';
+import { WagerTransactionResult, WagerTransactionView } from '../../application/wagering/wager-transaction.views';
 import { WagerTransactionStatus } from '../../domain/wagering/wager-transaction';
 import { WagerTransactionContract } from '../contracts/wager-transaction.contract';
 import { currentCorrelationId } from './correlation-id.middleware';
 import { parseBody } from './validation';
 
-/**
- * Status por desfecho (SPEC §8, INT-07). O status reflete o estado da transação, não o fato de
- * ser replay — exceto PROCESSED, onde 201 (criada agora) vs 200 (já existia) ajuda o provedor.
- */
 export function httpStatusFor(result: WagerTransactionResult): number {
   switch (result.status) {
     case WagerTransactionStatus.Processed:
