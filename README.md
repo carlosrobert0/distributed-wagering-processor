@@ -58,7 +58,9 @@ bun run test:concurrency    # 100−80−80, 50× mesma aposta, 3 processos, cra
 bun test                    # tudo
 ```
 
-O banco `wagering_test` é recriado a cada execução; cada arquivo de teste cria suas próprias filas.
+Cada arquivo de teste recebe um banco próprio, clonado de um template já migrado
+(`CREATE DATABASE … TEMPLATE`), e suas próprias filas — nenhum teste enxerga dados de outro. O timeout
+padrão dos testes (120 s) está em `bunfig.toml`.
 Para ver os logs das instâncias filhas: `TEST_INSTANCE_OUTPUT=1`; para logs da app em processo:
 `TEST_LOG_LEVEL=info`.
 
@@ -110,7 +112,8 @@ docker compose exec localstack awslocal sqs send-message \
     \"money\":{\"amount\":\"10.00\",\"currency\":\"BRL\"}}}"
 ```
 
-Filas: `wager-transactions.fifo` (entrada, redrive para a DLQ após 5 recebimentos),
+Filas: `wager-transactions.fifo` (entrada; a aplicação manda para a DLQ após 5 tentativas, e a redrive
+policy de 20 recebimentos fica como rede de segurança),
 `wager-transactions-dlq.fifo` e `wagering-events.fifo` (eventos de integração publicados pela outbox).
 
 ## Configuração
@@ -125,6 +128,7 @@ Filas: `wager-transactions.fifo` (entrada, redrive para a DLQ após 5 recebiment
 | `SQS_WAGER_QUEUE_NAME` / `SQS_WAGER_DLQ_NAME` / `SQS_EVENTS_QUEUE_NAME` | nomes acima | filas |
 | `CONSUMER_ENABLED` / `OUTBOX_RELAY_ENABLED` / `PENDING_REFERENCE_WORKER_ENABLED` | `true` | liga os processos em segundo plano |
 | `PENDING_REFERENCE_MAX_ATTEMPTS` | `8` | verificações antes de `REFERENCE_NOT_FOUND` |
+| `CONSUMER_MAX_ATTEMPTS` | `5` | tentativas de uma mensagem antes de a aplicação mandá-la para a DLQ |
 | `LOG_LEVEL` | `info` | nível do log JSON |
 
 A lista completa, com validação, está em [`src/infrastructure/config/app-config.ts`](src/infrastructure/config/app-config.ts).

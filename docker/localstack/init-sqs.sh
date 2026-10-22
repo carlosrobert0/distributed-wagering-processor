@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"
-MAX_RECEIVE_COUNT="${WAGER_MAX_RECEIVE_COUNT:-5}"
+MAX_RECEIVE_COUNT="${WAGER_MAX_RECEIVE_COUNT:-20}"
 
 awslocal --region "$REGION" sqs create-queue \
   --queue-name wager-transactions-dlq.fifo \

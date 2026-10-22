@@ -207,7 +207,7 @@ para duas wallets diferentes — terminam em violação de `UNIQUE`; o use case 
 | Só PROCESSED gera lançamento; valor = valor da transação | trigger `ledger_validate_entry` |
 | Ledger imutável | triggers `ledger_append_only` (UPDATE/DELETE) e `ledger_no_truncate` |
 | Transação terminal imutável; campos de negócio imutáveis | trigger `wager_tx_guard` |
-| Coerência de status | `wager_tx_failure_code_ck`, `wager_tx_terminal_timestamp_ck`, `wager_tx_observed_balance_ck`, `wager_tx_pending_schedule_ck`, `wager_tx_reference_resolved_ck` |
+| Coerência de status | `wager_tx_failure_code_ck`, `wager_tx_terminal_timestamp_ck`, `wager_tx_processed_balance_ck`, `wager_tx_unsettled_balance_ck`, `wager_tx_balance_currency_ck`, `wager_tx_pending_schedule_ck`, `wager_tx_reference_resolved_ck` |
 | REFUND/ROLLBACK exigem referência | `wager_tx_reversal_requires_reference_ck` (implicação — WIN pode referenciar, INT-03) |
 | **saldo materializado == ledger** | constraint triggers `DEFERRABLE INITIALLY DEFERRED` em `wallets` e no ledger, checadas no **COMMIT** |
 | Evento da outbox imutável | trigger `outbox_guard` |
@@ -216,9 +216,15 @@ para duas wallets diferentes — terminam em violação de `UNIQUE`; o use case 
 `(wallet_id, wallet_version)` serve a paginação do ledger, `(provider_id, reference_external_transaction_id)`
 parcial para "acordar" dependentes.
 
-**Por que constraint triggers diferidas?** Dentro da transação a ordem dos comandos é livre (inserir o
-lançamento antes ou depois do UPDATE da wallet), mas **nada inconsistente consegue ser commitado**:
-a checagem roda no COMMIT, quando o estado final está completo.
+**Por que constraint triggers diferidas?** A igualdade saldo == último lançamento só faz sentido com o
+estado final da transação: ela é checada no COMMIT, então o UPDATE da wallet pode vir antes ou depois do
+INSERT do lançamento. Já o encadeamento do ledger (`ledger_validate_entry`) é imediato (`BEFORE INSERT`):
+exige que a transação já exista como `PROCESSED` e que versão/saldo continuem a cadeia — por isso a
+aplicação grava sempre transação → lançamento → saldo.
+
+**Saldo observado com moeda própria.** `balance_after` vem acompanhado de `balance_currency` (a moeda da
+wallet). Sem isso, o replay de uma rejeição `CURRENCY_MISMATCH` devolveria o saldo BRL rotulado com a
+moeda USD da transação.
 
 Migration única e reversível (`up` cria tudo; `down` derruba na ordem inversa) — testada com up → down → up.
 
@@ -258,25 +264,36 @@ Regras do §7 implementadas em `settleWagerTransaction` (domínio). Ordem de val
   grupos, ack, visibilidade, DLQ, shutdown).
 - Reusa **o mesmo** `ProcessWagerTransactionUseCase` do HTTP.
 - **Inbox** `(consumer_name, message_id)` gravada **na mesma transação** do efeito
-  (`INSERT … ON CONFLICT DO NOTHING`). Também consultada no caminho rápido.
+  (`INSERT … ON CONFLICT DO NOTHING`) e marcada `processed_at` ao final. É uma barreira de verdade:
+  mensagem já recebida ⇒ devolve o resultado original sem novo efeito (métrica `inbox_duplicate`);
+  mesmo `messageId` com payload diferente ⇒ `INBOX_MESSAGE_CONFLICT`, erro permanente (DLQ). A
+  idempotency key continua como segunda barreira (mesma transação chegando com outro `messageId`).
 - **Ack (`DeleteMessage`) somente após o commit** — o use case só retorna depois do COMMIT.
 - **Classificação de erros:**
 
 | Classe | Exemplos | Ação |
 |---|---|---|
 | Negócio (terminal) | transação REJECTED, wallet inexistente, conflito de key | ack |
-| Transitório | banco fora, lock timeout, deadlock, erro desconhecido | `ChangeMessageVisibility` com backoff exponencial (2s → 120s) |
-| Permanente | JSON malformado, envelope inválido, payload inválido | copia para a DLQ com o motivo + ack |
+| Transitório | banco fora, lock/statement timeout, deadlock, corrida de unicidade, erro desconhecido | `ChangeMessageVisibility` com backoff exponencial (2s → 120s) |
+| Permanente | JSON malformado, envelope inválido, payload inválido, `INBOX_MESSAGE_CONFLICT`, violação de integridade ou invariante | copia para a DLQ com o motivo + ack |
 
-- **Limite de tentativas:** redrive policy `maxReceiveCount = 5` → o SQS move para
-  `wager-transactions-dlq.fifo`. Erro desconhecido conta como transitório: se for bug determinístico,
-  termina na DLQ depois das tentativas — nada se perde, nada duplica.
+- **Limite de tentativas na aplicação:** ao atingir `CONSUMER_MAX_ATTEMPTS` (5), a própria aplicação copia a
+  mensagem para a DLQ com o motivo (`MAX_ATTEMPTS_EXCEEDED: …`) e faz ack. A redrive policy
+  (`maxReceiveCount = 20`) fica só como rede de segurança: como as mensagens seguintes do mesmo grupo FIFO
+  também acumulam `ApproximateReceiveCount` enquanto esperam, depender só do redrive mandaria mensagens
+  saudáveis do grupo para a DLQ junto com a que falhou.
+- **Heartbeat de visibilidade:** enquanto um lote é processado, a visibilidade das mensagens ainda não
+  finalizadas é estendida a cada `visibilityTimeout/2`, para que um grupo lento não seja reentregue a
+  outra instância no meio do processamento.
+- **Falhas isoladas:** grupos rodam com `Promise.allSettled`; falha de ack é logada (a redelivery é
+  deduplicada pela inbox).
 - **Ordem:** paralelo entre `MessageGroupId` (wallets), sequencial dentro do grupo. Se uma mensagem do
   grupo falha, o resto do grupo volta junto (preserva a ordem FIFO). FIFO é otimização — a correção
   vem do banco (§8 do enunciado).
-- **SIGTERM:** `enableShutdownHooks` → `beforeApplicationShutdown`: para o long-poll (AbortController),
-  não inicia mensagens novas, devolve a visibilidade das não iniciadas (`VisibilityTimeout=0`) e espera
-  as em andamento terminarem (grace period configurável). Só depois o pool do banco é fechado.
+- **SIGTERM:** `enableShutdownHooks` → `beforeApplicationShutdown`: `/health/ready` passa a responder
+  `draining`, o long-poll é abortado, mensagens não iniciadas voltam com `VisibilityTimeout=0` e as em
+  andamento terminam dentro do grace period; se ele estourar, as restantes também são devolvidas. Só
+  depois o pool do banco é fechado.
 
 **Crash entre commit e ack:** a mensagem volta após o visibility timeout; a outra instância encontra a
 inbox (e a idempotency key) → só faz ack. Testado com um processo real morto por `SIGKILL`.
@@ -284,16 +301,22 @@ inbox (e a idempotency key) → só faz ack. Testado com um processo real morto 
 ### 9.2 Transactional Outbox
 
 - Eventos gravados em `outbox_messages` **na mesma transação** do efeito. Nada é publicado antes do commit.
-- **Relay** (em todas as instâncias): `SELECT … WHERE published_at IS NULL AND next_attempt_at <= now()
-  ORDER BY occurred_at FOR UPDATE SKIP LOCKED LIMIT N` → publica → marca `published_at` → commit.
-  Publishers concorrentes pegam lotes disjuntos.
-- **At-least-once:** se o processo morre depois de publicar e antes do commit, os locks caem e outra
+- **Relay** (em todas as instâncias), em três passos:
+  1. transação curta: `SELECT … WHERE published_at IS NULL AND next_attempt_at <= now() ORDER BY occurred_at
+     FOR UPDATE SKIP LOCKED LIMIT N` e **lease** (`next_attempt_at = now + 60s`) → commit;
+  2. publica no SQS **fora de transação** (cliente com timeout de conexão/requisição);
+  3. grava `published_at` (ou o retry) com `UPDATE … WHERE published_at IS NULL`.
+  Nenhum lock de banco fica preso durante a chamada de rede; publishers concorrentes pegam lotes disjuntos.
+- **At-least-once:** se o processo morre depois de publicar e antes do passo 3, o lease expira e outra
   instância republica com o **mesmo `eventId`**. Deduplicação: `MessageDeduplicationId = eventId` na
   fila FIFO (janela de 5 min, otimização) e, como garantia, o consumidor deduplica por `eventId`.
 - **Falha de publicação:** `attempts++`, `next_attempt_at` com backoff 1s·2ⁿ (teto 5 min), `last_error`.
   **Nunca desiste** (INT-08): descartar violaria "não perder eventos confirmados". O atraso aparece em
   `wagering_outbox_lag_seconds`.
-- **Destino (INT-09):** `wagering-events.fifo`, `MessageGroupId = walletId` (ordem por wallet).
+- **Destino (INT-09):** `wagering-events.fifo`, `MessageGroupId = walletId`.
+- **Ordem (INT-15):** dentro de um lote, em ordem de `occurred_at`, parando no primeiro erro (o resto do lote
+  é devolvido). Entre relays concorrentes a ordem por wallet é melhor esforço; `WalletBalanceChanged` traz
+  `walletVersion` para o consumidor ordenar/descartar.
 
 **Eventos:** `WagerTransactionProcessed` (inclusive LOSS e OPENING), `WagerTransactionRejected`,
 `WalletBalanceChanged` (somente quando o saldo muda), `WagerTransactionPendingReference`. Envelope =
@@ -364,7 +387,7 @@ Ligar a autenticação = registrar outra implementação da porta, sem tocar em 
 | Unidade — aplicação | orquestração dos use cases (replay, conflitos, inbox, corrida de unicidade, PENDING_REFERENCE, outbox) sobre um `UnitOfWork` em memória com commit/rollback | `test/unit/application` |
 | Unidade — bordas | erro → status HTTP, resultado → status, classificação SQS, SQLSTATE → transitório, decisões do handler SQS, guard, config | `test/unit/interfaces` |
 | Integração | migrations up/down, cada constraint/trigger, atomicidade (falha injetada antes do commit), API, outbox (2 publishers, crash, retry, duplicata), consumer (inbox, redelivery, retry, DLQ, shutdown), fora de ordem | `test/integration` |
-| Concorrência | 100−80−80 (25×), hot wallet, 50× mesma aposta, wallets em paralelo, 3 processos, crash antes do ack, SIGKILL + reinício | `test/concurrency` |
+| Concorrência | 100−80−80 (25×), hot wallet, 50× mesma aposta, wallets em paralelo, BET/WIN e REFUND/ROLLBACK simultâneos, 3 processos, crash antes do ack, SIGKILL + reinício | `test/concurrency` |
 
 - **Sem mocks de Postgres ou SQS nos testes de integração e concorrência:** rodam contra os containers
   do `docker compose`. O `UnitOfWork` em memória existe só para testar orquestração em milissegundos; as
@@ -373,8 +396,10 @@ Ligar a autenticação = registrar outra implementação da porta, sem tocar em 
   separados via `Bun.spawn` (`bun run src/main.ts`).
 - **Invariante final:** `expectWalletMatchesLedger` / `expectAllWalletsMatchLedger` recalculam o saldo
   pelo ledger em NUMERIC e conferem encadeamento e versão.
-- **Determinismo:** cada arquivo cria suas próprias filas e wallets; o banco de teste é recriado uma vez
-  por execução; esperas são por condição (`waitFor`), nunca `sleep` cego para asserção.
+- **Determinismo:** cada arquivo recebe um banco próprio (clone de um template migrado) e filas próprias,
+  então workers de instâncias de um teste nunca processam dados de outro; esperas são por condição
+  (`waitFor`), nunca `sleep` cego para asserção; filas são drenadas apagando as mensagens (sem isso o FIFO
+  bloqueia o grupo).
 - **Injeção de falha:** `FAULT_INJECTION=crash-after-commit` (somente teste) mata o processo com SIGKILL
   entre o commit e o ack; `FailAfterOutboxUnitOfWork` força rollback depois de todas as escritas.
 
@@ -386,14 +411,19 @@ Ligar a autenticação = registrar outra implementação da porta, sem tocar em 
   o *porquê* das decisões vive neste documento e no `SPEC.md`.
 - Formatação única com Prettier (`bun run format` / `bun run format:check`) e TypeScript strict
   (`noUncheckedIndexedAccess`, `noImplicitOverride`).
+- `DuplicateTransactionError` e `ConcurrencyViolationError` são transitórios (`reason: 'race'`): HTTP 503 e
+  retry na fila. Violações de constraint não-únicas viram `IntegrityViolationError` (bug/dado corrompido):
+  HTTP 500 e DLQ imediata.
 - Erros de entrada de JSON (malformado, grande demais) são tratados por um parser próprio e respondem no
   mesmo formato `{ error, message }` do resto da API.
 
 ## 15. Trade-offs e limitações conhecidas
 
 - **Throughput por wallet é serializado** (lock pessimista). Correto para dinheiro; escala por wallets.
-- **Relay publica dentro da transação de claim:** as linhas ficam travadas enquanto o SQS responde.
-  Com timeout do SDK e lotes pequenos é aceitável; alternativa seria "lease" com `locked_until`.
+- **Lease da outbox (60 s):** se uma publicação demorar mais que o lease, outra instância pode republicar o
+  evento — continua at-least-once com o mesmo `eventId`.
+- **Head-of-line entre grupos:** o consumer só busca o próximo lote quando o atual termina; um grupo lento
+  atrasa os demais da mesma instância (outras instâncias seguem consumindo).
 - **Crescimento de `outbox_messages` e `inbox_messages`:** não há job de retenção. Em produção:
   particionar por data ou expurgar publicados/processados após N dias (a inbox precisa reter pelo
   menos a janela de redelivery possível).

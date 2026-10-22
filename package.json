@@ -26,6 +26,7 @@
     "@nestjs/common": "^11.1.0",
     "@nestjs/core": "^11.1.0",
     "@nestjs/platform-express": "^11.1.0",
+    "@smithy/node-http-handler": "^4.12.1",
     "express": "^5.1.0",
     "pino": "^9.5.0",
     "prom-client": "^15.1.3",

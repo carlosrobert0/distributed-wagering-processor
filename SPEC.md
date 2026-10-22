@@ -76,7 +76,7 @@ Legenda de origem: `§N` = seção do enunciado.
 | AC-PEND-01 | Worker agendado reprocessa `PENDING_REFERENCE` com backoff exponencial |
 | AC-PEND-02 | Limite: 8 tentativas (2s, 4s, …, 256s ≈ 8,5 min no total) — INT-06 |
 | AC-PEND-03 | Esgotado ⇒ `REJECTED REFERENCE_NOT_FOUND` + `WagerTransactionRejected` publicado |
-| AC-PEND-04 | Seguro com múltiplos workers/instâncias (`FOR UPDATE SKIP LOCKED`, ordem de lock wallet → transação) |
+| AC-PEND-04 | Seguro com múltiplos workers/instâncias: candidatas reivindicadas atomicamente (`UPDATE … WHERE id IN (… FOR UPDATE SKIP LOCKED)`) com lease de 30 s; processamento trava wallet → transação |
 | AC-PEND-05 | Ao processar uma transação, dependentes pendentes que a referenciam são "acordadas" (`next_reference_check_at = now`) — otimização de latência |
 
 ### 4.2 Taxonomia de falhas (§7.2)
@@ -93,6 +93,8 @@ Legenda de origem: `§N` = seção do enunciado.
 | `ALREADY_REVERSED` | referência já revertida | desistir (já foi feito) |
 | `CURRENCY_MISMATCH` | moeda da operação ≠ moeda da wallet | corrigir payload |
 | `PLAYER_WALLET_MISMATCH` | `playerId` ≠ dono da wallet | corrigir payload |
+| `REFERENCE_REVERSED` | WIN/LOSS referenciando uma BET já revertida (INT-13) | desistir |
+| `BALANCE_LIMIT_EXCEEDED` | crédito que ultrapassaria o limite de `NUMERIC(20,2)` | escalar para operação |
 | `PROCESSING_ERROR` | erro permanente de infraestrutura no reprocessamento (status `FAILED`) | contatar operação |
 
 Erros que **não** viram transação persistida (respondidos diretamente): `INVALID_PAYLOAD`, `IDEMPOTENCY_KEY_REQUIRED`,
@@ -162,10 +164,10 @@ Erros que **não** viram transação persistida (respondidos diretamente): `INVA
 |---|---|
 | AC-SQS-01 | Filas `wager-transactions.fifo` e `wager-transactions-dlq.fifo` (redrive `maxReceiveCount`) |
 | AC-SQS-02 | Consumer reutiliza o mesmo use case do HTTP |
-| AC-SQS-03 | Inbox persistente `(consumer_name, message_id)` gravada na mesma transação SQL |
+| AC-SQS-03 | Inbox persistente `(consumer_name, message_id)` gravada na mesma transação SQL; mensagem já recebida ⇒ replay sem novo efeito; mesmo `messageId` com outro payload ⇒ `INBOX_MESSAGE_CONFLICT` (DLQ) |
 | AC-SQS-04 | `DeleteMessage` (ack) somente após o commit |
-| AC-SQS-05 | Erro de negócio ⇒ ack; transitório ⇒ visibilidade com backoff exponencial; permanente ⇒ DLQ imediata |
-| AC-SQS-06 | Limite de tentativas antes da DLQ (redrive `maxReceiveCount`) |
+| AC-SQS-05 | Erro de negócio ⇒ ack; transitório ⇒ visibilidade com backoff exponencial; permanente (payload inválido, violação de integridade/invariante) ⇒ DLQ imediata |
+| AC-SQS-06 | Limite de tentativas controlado pela aplicação (`CONSUMER_MAX_ATTEMPTS`, padrão 5) ⇒ DLQ com motivo; redrive `maxReceiveCount=20` só como rede de segurança |
 | AC-SQS-07 | `SIGTERM`: para de buscar, conclui mensagens em andamento e devolve visibilidade das não iniciadas |
 | AC-SQS-08 | Redelivery não duplica efeitos |
 
@@ -174,7 +176,7 @@ Erros que **não** viram transação persistida (respondidos diretamente): `INVA
 | ID | Critério de aceite |
 |---|---|
 | AC-OUT-01 | Transação, saldo, ledger, inbox e evento gravados atomicamente |
-| AC-OUT-02 | Relay com múltiplos publishers concorrentes (`FOR UPDATE SKIP LOCKED`) |
+| AC-OUT-02 | Relay com múltiplos publishers concorrentes: claim com `FOR UPDATE SKIP LOCKED` + lease de 60 s em transação curta; publicação fora da transação |
 | AC-OUT-03 | Commit → processo morre → outra instância publica |
 | AC-OUT-04 | Publicação duplicada é segura (`eventId` estável = `MessageDeduplicationId`; consumidor deduplica por `eventId`) |
 | AC-OUT-05 | Eventos: `WagerTransactionProcessed` (inclusive LOSS e OPENING), `WagerTransactionRejected`, `WalletBalanceChanged` (somente quando o saldo muda), `WagerTransactionPendingReference` |
@@ -211,7 +213,7 @@ Erros que **não** viram transação persistida (respondidos diretamente): `INVA
 | ≥ 3 instâncias | `test/concurrency/multi-instance.test.ts` |
 | Worker morto após commit, antes do ack | `test/concurrency/crash-before-ack.test.ts` |
 | Dois publishers na mesma outbox | `test/integration/outbox-relay.test.ts` |
-| ROLLBACK/REFUND antes da referência | `test/integration/out-of-order.test.ts` |
+| ROLLBACK/REFUND antes da referência | `test/integration/out-of-order.test.ts`, `test/concurrency/out-of-order-race.test.ts` |
 | Invariante final `balance == ledger` | `test/support/invariants.ts`, chamado em todos os testes de integração/concorrência |
 
 ---
@@ -229,4 +231,7 @@ Erros que **não** viram transação persistida (respondidos diretamente): `INVA
 - **INT-09 — Fila de eventos.** O enunciado define apenas a fila de comandos; os eventos de integração vão para `wagering-events.fifo` (`MessageGroupId = walletId`, `MessageDeduplicationId = eventId`).
 - **INT-10 — OPENING.** Transação interna com `providerId = "internal"`, `externalTransactionId = "opening:{walletId}"`, `idempotencyKey = "internal:opening:{walletId}"`, `roundId = "opening"`, `gameId = "internal"`. Validações de entrada rejeitam `kind = OPENING` e `providerId = "internal"`.
 - **INT-11 — Conflito de idempotência na fila.** Mesma key com payload diferente vindo do SQS é tratado como erro de negócio terminal (ack + log + métrica), igual ao 409 do HTTP.
+- **INT-13 — WIN/LOSS sobre BET revertida.** O enunciado não proíbe, mas creditar um WIN de uma aposta já estornada pagaria duas vezes. Rejeitamos com `REFERENCE_REVERSED`.
+- **INT-14 — Saldo observado em rejeições.** `balance` acompanha toda rejeição, na moeda da wallet (`balance_currency`), exceto `PLAYER_WALLET_MISMATCH`: ali o chamador não é dono da wallet e o saldo não é exposto.
+- **INT-15 — Ordem de eventos.** Dentro de um lote, o relay publica em ordem de `occurred_at` e para no primeiro erro; entre relays concorrentes a ordem por wallet é melhor esforço. Consumidores ordenam por `walletVersion` (presente em `WalletBalanceChanged`).
 - **INT-12 — FAILED.** Usado quando o reprocessamento de `PENDING_REFERENCE` encontra erro não transitório (ex.: dado corrompido que viola invariante do domínio). Fica auditável com `PROCESSING_ERROR`.
