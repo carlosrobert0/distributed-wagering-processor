@@ -5,10 +5,10 @@ import {
   ReceiveMessageCommand,
   SendMessageCommand,
 } from '@aws-sdk/client-sqs';
-import { AppLogger, Metrics } from '../../application/ports/system';
+import { AppLogger, LogFields, Metrics } from '../../application/ports/system';
 import { ExponentialBackoff } from '../../domain/shared/exponential-backoff';
-import { SqsQueues } from '../../infrastructure/messaging/sqs';
-import { WagerMessageHandler } from './wager-message.handler';
+import { SQS_REQUEST_TIMEOUT_MS, SqsQueues } from '../../infrastructure/messaging/sqs';
+import { MessageContext, WagerMessageHandler } from './wager-message.handler';
 
 export interface WagerConsumerOptions {
   queueName: string;
@@ -16,6 +16,7 @@ export interface WagerConsumerOptions {
   waitTimeSeconds: number;
   visibilityTimeoutSeconds: number;
   batchSize: number;
+  maxAttempts: number;
   retryBaseSeconds: number;
   retryMaxSeconds: number;
   shutdownGraceMs: number;
@@ -28,13 +29,17 @@ const MAX_VISIBILITY_TIMEOUT_SECONDS = 43_200;
 const POLL_FAILURE_BACKOFF_MS = 1_000;
 const MAX_DEAD_LETTER_REASON_LENGTH = 1_000;
 
+interface InFlightMessage {
+  queueUrl: string;
+  message: Message;
+}
+
 export class WagerTransactionsConsumer {
   private running = false;
   private loop?: Promise<void>;
   private pollAbort = new AbortController();
-  private readonly inFlight = new Set<Promise<unknown>>();
-  private readonly backoff: ExponentialBackoff;
-  private maxReceiveCount?: number;
+  private readonly inFlight = new Map<string, InFlightMessage>();
+  private readonly retryBackoff: ExponentialBackoff;
 
   constructor(
     private readonly handler: WagerMessageHandler,
@@ -44,7 +49,7 @@ export class WagerTransactionsConsumer {
     private readonly logger: AppLogger,
   ) {
     const base = Math.max(1, options.retryBaseSeconds);
-    this.backoff = new ExponentialBackoff(base, Math.max(base, options.retryMaxSeconds));
+    this.retryBackoff = new ExponentialBackoff(base, Math.max(base, options.retryMaxSeconds));
   }
 
   start(): void {
@@ -59,11 +64,17 @@ export class WagerTransactionsConsumer {
     if (!this.running) return;
     this.running = false;
     this.pollAbort.abort();
-    const drained = Promise.allSettled([...this.inFlight]).then(() => true);
-    const timedOut = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), this.options.shutdownGraceMs));
+
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<false>((resolve) => {
+      graceTimer = setTimeout(() => resolve(false), this.options.shutdownGraceMs);
+    });
+    const drained = (this.loop ?? Promise.resolve()).then(() => true as const);
     const drainedInTime = await Promise.race([drained, timedOut]);
-    if (drainedInTime) {
-      await this.loop?.catch(() => undefined);
+    clearTimeout(graceTimer);
+
+    if (!drainedInTime) {
+      await this.releaseAll([...this.inFlight.values()]);
     }
     this.logger.info('sqs consumer stopped', { drained: drainedInTime });
   }
@@ -74,7 +85,7 @@ export class WagerTransactionsConsumer {
         await this.pollOnce();
       } catch (error) {
         if (!this.running) break;
-        this.logger.warn('sqs poll failed; backing off', { reason: describe(error) });
+        this.logger.warn('sqs poll failed; backing off', {}, error);
         await sleep(POLL_FAILURE_BACKOFF_MS);
       }
     }
@@ -82,7 +93,6 @@ export class WagerTransactionsConsumer {
 
   private async pollOnce(): Promise<void> {
     const queueUrl = await this.queues.url(this.options.queueName);
-    this.maxReceiveCount ??= await this.queues.maxReceiveCount(this.options.queueName).catch(() => undefined);
     const response = await this.queues.client.send(
       new ReceiveMessageCommand({
         QueueUrl: queueUrl,
@@ -92,132 +102,158 @@ export class WagerTransactionsConsumer {
         MessageSystemAttributeNames: ['ApproximateReceiveCount', 'MessageGroupId'],
         AttributeNames: ['All'],
       }),
-      { abortSignal: this.pollAbort.signal },
+      {
+        abortSignal: this.pollAbort.signal,
+        requestTimeout: this.options.waitTimeSeconds * 1_000 + SQS_REQUEST_TIMEOUT_MS,
+      },
     );
-    const messages = response.Messages ?? [];
+    const received = (response.Messages ?? []).map((message) => ({ queueUrl, message }));
     if (!this.running) {
-      await this.releaseAll(queueUrl, messages);
+      await this.releaseAll(received);
       return;
     }
-    if (messages.length > 0) {
-      await this.track(this.processBatch(queueUrl, messages));
+    if (received.length > 0) {
+      await this.processBatch(received);
     }
   }
 
-  private async processBatch(queueUrl: string, messages: Message[]): Promise<void> {
-    const groups = new Map<string, Message[]>();
-    for (const message of messages) {
-      const group = message.Attributes?.MessageGroupId ?? message.MessageId ?? 'default';
-      groups.set(group, [...(groups.get(group) ?? []), message]);
+  private async processBatch(batch: InFlightMessage[]): Promise<void> {
+    batch.forEach((entry) => this.inFlight.set(handleOf(entry.message), entry));
+    const heartbeat = this.startVisibilityHeartbeat();
+    try {
+      const groups = new Map<string, InFlightMessage[]>();
+      for (const entry of batch) {
+        const group = entry.message.Attributes?.MessageGroupId ?? entry.message.MessageId ?? 'default';
+        groups.set(group, [...(groups.get(group) ?? []), entry]);
+      }
+      await Promise.allSettled([...groups.values()].map((group) => this.processGroup(group)));
+    } finally {
+      clearInterval(heartbeat);
+      batch.forEach((entry) => this.inFlight.delete(handleOf(entry.message)));
     }
-    await Promise.all([...groups.values()].map((group) => this.processGroup(queueUrl, group)));
   }
 
-  private async processGroup(queueUrl: string, group: Message[]): Promise<void> {
-    for (const [index, message] of group.entries()) {
+  private async processGroup(group: InFlightMessage[]): Promise<void> {
+    for (const [index, entry] of group.entries()) {
       if (!this.running) {
-        await this.releaseAll(queueUrl, group.slice(index));
+        await this.releaseAll(group.slice(index));
         return;
       }
-      if ((await this.process(queueUrl, message)) === 'retry-scheduled') {
-        const delay = this.retryDelaySeconds(message);
-        await Promise.all(group.slice(index + 1).map((rest) => this.changeVisibility(queueUrl, rest, delay)));
+      const disposition = await this.process(entry).catch((error: unknown) => {
+        this.logger.error('sqs message handling failed', { sqsMessageId: entry.message.MessageId }, error);
+        return 'retry-scheduled' as const;
+      });
+      this.inFlight.delete(handleOf(entry.message));
+      if (disposition === 'retry-scheduled') {
+        const delay = this.retryDelaySeconds(entry.message);
+        await Promise.all(group.slice(index + 1).map((rest) => this.changeVisibility(rest, delay)));
         return;
       }
     }
   }
 
-  private async process(queueUrl: string, message: Message): Promise<MessageDisposition> {
-    const decision = await this.handler.handle(message.Body);
+  private async process(entry: InFlightMessage): Promise<MessageDisposition> {
+    const decision = await this.handler.handle(entry.message.Body);
     switch (decision.action) {
       case 'ack':
         if (decision.committed) {
           this.injectCrashAfterCommit();
         }
-        await this.ack(queueUrl, message);
+        await this.ack(entry);
         return 'acked';
       case 'dead-letter':
-        await this.deadLetter(queueUrl, message, decision.reason);
+        await this.deadLetter(entry, decision.reason, decision.context, 'permanent');
         return 'dead-lettered';
       case 'retry':
-        await this.scheduleRetry(queueUrl, message, decision.reason);
-        return 'retry-scheduled';
+        return this.scheduleRetry(entry, decision.reason, decision.context);
     }
   }
 
-  private async scheduleRetry(queueUrl: string, message: Message, reason: string): Promise<void> {
-    const receiveCount = receiveCountOf(message);
-    const delay = this.retryDelaySeconds(message);
-    this.metrics.retry('sqs_consumer');
-    if (this.maxReceiveCount !== undefined && receiveCount >= this.maxReceiveCount) {
-      this.metrics.deadLettered('max_receive_count');
+  private async scheduleRetry(
+    entry: InFlightMessage,
+    reason: string,
+    context: MessageContext,
+  ): Promise<MessageDisposition> {
+    const attempt = receiveCountOf(entry.message);
+    if (attempt >= this.options.maxAttempts) {
+      await this.deadLetter(entry, `MAX_ATTEMPTS_EXCEEDED after ${attempt}: ${reason}`, context, 'max_attempts');
+      return 'dead-lettered';
     }
-    this.logger.warn('sqs message failed transiently; retry scheduled', {
-      sqsMessageId: message.MessageId,
+    const delay = this.retryDelaySeconds(entry.message);
+    this.metrics.retry('sqs_consumer');
+    this.logger.warn('sqs message retry scheduled', {
+      ...logFields(entry, context),
       error: reason,
-      receiveCount,
+      attempt,
       retryInSeconds: delay,
     });
-    await this.changeVisibility(queueUrl, message, delay);
+    await this.changeVisibility(entry, delay);
+    return 'retry-scheduled';
   }
 
-  private async deadLetter(queueUrl: string, message: Message, reason: string): Promise<void> {
+  private async deadLetter(
+    entry: InFlightMessage,
+    reason: string,
+    context: MessageContext,
+    kind: 'permanent' | 'max_attempts',
+  ): Promise<void> {
     const truncatedReason = reason.slice(0, MAX_DEAD_LETTER_REASON_LENGTH);
     await this.queues.client.send(
       new SendMessageCommand({
         QueueUrl: await this.queues.url(this.options.dlqName),
-        MessageBody: message.Body ?? '',
-        MessageGroupId: message.Attributes?.MessageGroupId ?? 'dead-letter',
-        MessageDeduplicationId: message.MessageId ?? `${Date.now()}`,
+        MessageBody: entry.message.Body ?? '',
+        MessageGroupId: entry.message.Attributes?.MessageGroupId ?? 'dead-letter',
+        MessageDeduplicationId: entry.message.MessageId ?? `${Date.now()}`,
         MessageAttributes: {
           deadLetterReason: { DataType: 'String', StringValue: truncatedReason },
-          originalMessageId: { DataType: 'String', StringValue: message.MessageId ?? 'unknown' },
+          originalMessageId: { DataType: 'String', StringValue: entry.message.MessageId ?? 'unknown' },
         },
       }),
     );
-    await this.ack(queueUrl, message);
-    this.metrics.deadLettered('permanent');
-    this.logger.error('sqs message moved to DLQ', { sqsMessageId: message.MessageId, reason: truncatedReason });
+    await this.ack(entry);
+    this.metrics.deadLettered(kind);
+    this.logger.error('sqs message moved to DLQ', { ...logFields(entry, context), reason: truncatedReason });
   }
 
-  private async ack(queueUrl: string, message: Message): Promise<void> {
-    await this.queues.client.send(
-      new DeleteMessageCommand({ QueueUrl: queueUrl, ReceiptHandle: message.ReceiptHandle }),
-    );
+  private async ack(entry: InFlightMessage): Promise<void> {
+    try {
+      await this.queues.client.send(
+        new DeleteMessageCommand({ QueueUrl: entry.queueUrl, ReceiptHandle: entry.message.ReceiptHandle }),
+      );
+    } catch (error) {
+      this.logger.warn('sqs ack failed; message will be redelivered and deduplicated', logFields(entry, {}), error);
+    }
   }
 
-  private async changeVisibility(queueUrl: string, message: Message, seconds: number): Promise<void> {
+  private startVisibilityHeartbeat(): ReturnType<typeof setInterval> {
+    const extendEveryMs = Math.max(1_000, (this.options.visibilityTimeoutSeconds * 1_000) / 2);
+    return setInterval(() => {
+      for (const entry of this.inFlight.values()) {
+        void this.changeVisibility(entry, this.options.visibilityTimeoutSeconds);
+      }
+    }, extendEveryMs);
+  }
+
+  private async changeVisibility(entry: InFlightMessage, seconds: number): Promise<void> {
     try {
       await this.queues.client.send(
         new ChangeMessageVisibilityCommand({
-          QueueUrl: queueUrl,
-          ReceiptHandle: message.ReceiptHandle,
+          QueueUrl: entry.queueUrl,
+          ReceiptHandle: entry.message.ReceiptHandle,
           VisibilityTimeout: seconds,
         }),
       );
     } catch (error) {
-      this.logger.warn('could not change message visibility', {
-        sqsMessageId: message.MessageId,
-        reason: describe(error),
-      });
+      this.logger.warn('could not change message visibility', logFields(entry, {}), error);
     }
   }
 
-  private async releaseAll(queueUrl: string, messages: Message[]): Promise<void> {
-    await Promise.all(messages.map((message) => this.changeVisibility(queueUrl, message, 0)));
+  private async releaseAll(entries: InFlightMessage[]): Promise<void> {
+    await Promise.all(entries.map((entry) => this.changeVisibility(entry, 0)));
   }
 
   private retryDelaySeconds(message: Message): number {
-    return Math.min(MAX_VISIBILITY_TIMEOUT_SECONDS, Math.round(this.backoff.delayFor(receiveCountOf(message))));
-  }
-
-  private async track<T>(work: Promise<T>): Promise<T> {
-    this.inFlight.add(work);
-    try {
-      return await work;
-    } finally {
-      this.inFlight.delete(work);
-    }
+    return Math.min(MAX_VISIBILITY_TIMEOUT_SECONDS, Math.round(this.retryBackoff.delayFor(receiveCountOf(message))));
   }
 
   private injectCrashAfterCommit(): void {
@@ -228,12 +264,16 @@ export class WagerTransactionsConsumer {
   }
 }
 
+function handleOf(message: Message): string {
+  return message.ReceiptHandle ?? message.MessageId ?? '';
+}
+
 function receiveCountOf(message: Message): number {
   return Number(message.Attributes?.ApproximateReceiveCount ?? '1');
 }
 
-function describe(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function logFields(entry: InFlightMessage, context: MessageContext): LogFields {
+  return { ...context, sqsMessageId: entry.message.MessageId };
 }
 
 function sleep(ms: number): Promise<void> {

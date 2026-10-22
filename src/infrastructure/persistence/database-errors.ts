@@ -1,10 +1,11 @@
 import {
   ConnectionException,
+  ConstraintViolationException,
   DeadlockException,
   LockWaitTimeoutException,
   UniqueConstraintViolationException,
 } from '@mikro-orm/core';
-import { TransientInfrastructureError, TransientReason } from '../../application/errors';
+import { IntegrityViolationError, TransientInfrastructureError, TransientReason } from '../../application/errors';
 
 enum SqlState {
   LockNotAvailable = '55P03',
@@ -24,7 +25,7 @@ enum SqlState {
 
 const TRANSIENT_SQL_STATES: Readonly<Record<string, TransientReason>> = {
   [SqlState.LockNotAvailable]: 'lock_timeout',
-  [SqlState.QueryCanceled]: 'lock_timeout',
+  [SqlState.QueryCanceled]: 'statement_timeout',
   [SqlState.SerializationFailure]: 'deadlock',
   [SqlState.DeadlockDetected]: 'deadlock',
   [SqlState.AdminShutdown]: 'connection',
@@ -89,6 +90,15 @@ export function toTransientError(error: unknown): TransientInfrastructureError |
 
   if (error instanceof Error && CONNECTION_FAILURE_MESSAGE.test(error.message)) {
     return new TransientInfrastructureError('Database connection failure', 'connection', { cause: error });
+  }
+  return undefined;
+}
+
+export function toIntegrityError(error: unknown): IntegrityViolationError | undefined {
+  if (error instanceof ConstraintViolationException && !(error instanceof UniqueConstraintViolationException)) {
+    return new IntegrityViolationError(`Database integrity check rejected the operation: ${error.message}`, {
+      cause: error,
+    });
   }
   return undefined;
 }

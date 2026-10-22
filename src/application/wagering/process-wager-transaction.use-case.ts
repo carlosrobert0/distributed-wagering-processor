@@ -10,6 +10,7 @@ import { Wallet } from '../../domain/wallet/wallet';
 import {
   DuplicateTransactionError,
   ExternalTransactionConflictError,
+  InboxMessageConflictError,
   IdempotencyKeyConflictError,
   InvalidPayloadError,
   WalletNotFoundError,
@@ -65,13 +66,11 @@ export class ProcessWagerTransactionUseCase {
     draft: WagerTransaction,
     ctx: ProcessingContext,
   ): Promise<WagerTransactionResult | undefined> {
-    const existing = await this.uow.run(async (scope) => {
-      if (ctx.inbox && (await scope.inbox.find(ctx.inbox.consumerName, ctx.inbox.messageId))) {
-        this.metrics.duplicateDetected('inbox_duplicate');
-      }
-      return this.findExisting(scope, draft);
-    });
-    return existing ? this.replay(existing, draft) : undefined;
+    const { duplicateDelivery, existing } = await this.uow.run(async (scope) => ({
+      duplicateDelivery: ctx.inbox ? await this.isDuplicateDelivery(scope, ctx.inbox) : false,
+      existing: await this.findExisting(scope, draft),
+    }));
+    return existing ? this.replay(existing, draft, duplicateDelivery) : undefined;
   }
 
   private async processResolvingRaces(
@@ -96,16 +95,28 @@ export class ProcessWagerTransactionUseCase {
     draft: WagerTransaction,
     ctx: ProcessingContext,
   ): Promise<WagerTransactionResult> {
-    if (ctx.inbox) {
-      await this.receiveInbox(scope, ctx.inbox);
+    const inbox = ctx.inbox ? await this.receiveInbox(scope, ctx.inbox) : undefined;
+    const result = await this.settleOrReplay(scope, draft, ctx, inbox?.duplicateDelivery ?? false);
+    if (inbox && !inbox.duplicateDelivery) {
+      inbox.message.markProcessed(this.clock.now());
+      await scope.inbox.markProcessed(inbox.message);
     }
+    return result;
+  }
+
+  private async settleOrReplay(
+    scope: TransactionScope,
+    draft: WagerTransaction,
+    ctx: ProcessingContext,
+    duplicateDelivery: boolean,
+  ): Promise<WagerTransactionResult> {
     const wallet = await this.lockWallet(scope, draft.walletId);
     const existing = await this.findExisting(scope, draft);
     if (existing) {
-      return this.replay(existing, draft);
+      return this.replay(existing, draft, duplicateDelivery);
     }
 
-    const outcome = await this.settlement.settle(scope, wallet, draft, ctx, 'insert');
+    const outcome = await this.settlement.settle(scope, wallet, draft, ctx);
     this.logger.info('wager transaction settled', {
       correlationId: ctx.correlationId,
       messageId: ctx.inbox?.messageId,
@@ -120,13 +131,27 @@ export class ProcessWagerTransactionUseCase {
     return toResult(draft, false);
   }
 
-  private async receiveInbox(scope: TransactionScope, receipt: InboxReceipt): Promise<void> {
-    const now = this.clock.now();
-    const inbox = InboxMessage.receive({ ...receipt, receivedAt: now });
-    inbox.markProcessed(now);
-    if (!(await scope.inbox.tryReceive(inbox))) {
-      this.metrics.duplicateDetected('inbox_duplicate');
+  private async receiveInbox(
+    scope: TransactionScope,
+    receipt: InboxReceipt,
+  ): Promise<{ message: InboxMessage; duplicateDelivery: boolean }> {
+    const message = InboxMessage.receive({ ...receipt, receivedAt: this.clock.now() });
+    if (await scope.inbox.tryReceive(message)) {
+      return { message, duplicateDelivery: false };
     }
+    await this.isDuplicateDelivery(scope, receipt);
+    return { message, duplicateDelivery: true };
+  }
+
+  private async isDuplicateDelivery(scope: TransactionScope, receipt: InboxReceipt): Promise<boolean> {
+    const received = await scope.inbox.find(receipt.consumerName, receipt.messageId);
+    if (!received) {
+      return false;
+    }
+    if (!received.matchesPayload(receipt.payloadHash)) {
+      throw new InboxMessageConflictError(receipt.consumerName, receipt.messageId);
+    }
+    return true;
   }
 
   private async lockWallet(scope: TransactionScope, walletId: string): Promise<Wallet> {
@@ -146,7 +171,11 @@ export class ProcessWagerTransactionUseCase {
     );
   }
 
-  private replay(existing: WagerTransaction, draft: WagerTransaction): WagerTransactionResult {
+  private replay(
+    existing: WagerTransaction,
+    draft: WagerTransaction,
+    duplicateDelivery: boolean,
+  ): WagerTransactionResult {
     if (existing.idempotencyKey !== draft.idempotencyKey) {
       this.metrics.duplicateDetected('idempotency_conflict');
       throw new ExternalTransactionConflictError(draft.providerId, draft.externalTransactionId);
@@ -155,7 +184,7 @@ export class ProcessWagerTransactionUseCase {
       this.metrics.duplicateDetected('idempotency_conflict');
       throw new IdempotencyKeyConflictError(draft.idempotencyKey);
     }
-    this.metrics.duplicateDetected('idempotent_replay');
+    this.metrics.duplicateDetected(duplicateDelivery ? 'inbox_duplicate' : 'idempotent_replay');
     return toResult(existing, true);
   }
 

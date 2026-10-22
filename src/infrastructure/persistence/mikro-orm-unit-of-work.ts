@@ -2,7 +2,7 @@ import { IsolationLevel } from '@mikro-orm/core';
 import { EntityManager, MikroORM } from '@mikro-orm/postgresql';
 import { Metrics } from '../../application/ports/system';
 import { TransactionScope, UnitOfWork } from '../../application/ports/unit-of-work';
-import { toTransientError } from './database-errors';
+import { toIntegrityError, toTransientError } from './database-errors';
 import { MikroOrmInboxRepository, MikroOrmOutboxRepository } from './repositories/messaging.repositories';
 import { MikroOrmLedgerRepository } from './repositories/ledger.repository';
 import { MikroOrmWagerTransactionRepository } from './repositories/wager-transaction.repository';
@@ -53,7 +53,7 @@ export class MikroOrmUnitOfWork implements UnitOfWork {
     if (transient?.reason === 'lock_timeout' || transient?.reason === 'deadlock') {
       this.metrics?.lockConflict(transient.reason);
     }
-    return transient ?? error;
+    return transient ?? toIntegrityError(error) ?? error;
   }
 }
 

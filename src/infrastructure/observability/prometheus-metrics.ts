@@ -100,7 +100,7 @@ export class PrometheusMetrics implements Metrics {
     this.retries.inc({ component });
   }
 
-  deadLettered(reason: 'permanent' | 'max_receive_count'): void {
+  deadLettered(reason: 'permanent' | 'max_attempts'): void {
     this.deadLetters.inc({ reason });
   }
 

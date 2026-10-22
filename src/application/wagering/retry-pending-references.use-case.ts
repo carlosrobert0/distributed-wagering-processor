@@ -14,6 +14,8 @@ export interface PendingReferenceRunResult {
   failed: number;
 }
 
+export const PENDING_REFERENCE_LEASE_MS = 30_000;
+
 type CandidateOutcome = 'settled' | 'still-pending' | 'skipped' | 'deferred' | 'failed';
 
 export class RetryPendingReferencesUseCase {
@@ -27,7 +29,11 @@ export class RetryPendingReferencesUseCase {
 
   async runOnce(batchSize: number): Promise<PendingReferenceRunResult> {
     const candidates = await this.uow.run((scope) =>
-      scope.transactions.findDuePendingReferences(this.clock.now(), batchSize),
+      scope.transactions.claimDuePendingReferences(
+        this.clock.now(),
+        batchSize,
+        new Date(this.clock.now().getTime() + PENDING_REFERENCE_LEASE_MS),
+      ),
     );
     const result: PendingReferenceRunResult = { candidates: candidates.length, settled: 0, stillPending: 0, failed: 0 };
 
@@ -75,17 +81,15 @@ export class RetryPendingReferencesUseCase {
   private settleCandidate(candidate: PendingReferenceCandidate): Promise<SettlementOutcome | undefined> {
     return this.uow.run(async (scope) => {
       const wallet = await scope.wallets.findByIdForUpdate(candidate.walletId);
-      const transaction = await scope.transactions.lockDuePendingReference(candidate.transactionId, this.clock.now());
+      const transaction = await scope.transactions.lockPendingReference(candidate.transactionId);
       if (!wallet || !transaction) {
         return undefined;
       }
-      return this.settlement.settle(
-        scope,
-        wallet,
-        transaction,
-        { correlationId: `pending-reference:${transaction.id}`, causationId: transaction.id, source: 'worker' },
-        'update',
-      );
+      return this.settlement.settle(scope, wallet, transaction, {
+        correlationId: `pending-reference:${transaction.id}`,
+        causationId: transaction.id,
+        source: 'worker',
+      });
     });
   }
 

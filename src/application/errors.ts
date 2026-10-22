@@ -20,6 +20,16 @@ export class InvalidPayloadError extends ApplicationError {
   }
 }
 
+export class InboxMessageConflictError extends InvalidPayloadError {
+  constructor(consumerName: string, messageId: string) {
+    super(
+      `Message ${consumerName}/${messageId} was already received with a different payload`,
+      undefined,
+      'INBOX_MESSAGE_CONFLICT',
+    );
+  }
+}
+
 export abstract class NotFoundError extends ApplicationError {}
 
 export class WalletNotFoundError extends NotFoundError {
@@ -64,7 +74,7 @@ export class WalletAlreadyExistsError extends ConflictError {
   }
 }
 
-export type TransientReason = 'connection' | 'lock_timeout' | 'deadlock' | 'unavailable';
+export type TransientReason = 'connection' | 'lock_timeout' | 'statement_timeout' | 'deadlock' | 'race';
 
 export class TransientInfrastructureError extends ApplicationError {
   readonly code = 'TRANSIENT_FAILURE';
@@ -78,18 +88,22 @@ export class TransientInfrastructureError extends ApplicationError {
   }
 }
 
-export class DuplicateTransactionError extends ApplicationError {
-  readonly code = 'DUPLICATE_TRANSACTION';
-
+export class DuplicateTransactionError extends TransientInfrastructureError {
   constructor(constraint?: string) {
-    super(`Concurrent duplicate transaction${constraint ? ` (${constraint})` : ''}`);
+    super(`Concurrent duplicate transaction${constraint ? ` (${constraint})` : ''}`, 'race');
   }
 }
 
-export class ConcurrencyViolationError extends ApplicationError {
-  readonly code = 'CONCURRENCY_VIOLATION';
-
+export class ConcurrencyViolationError extends TransientInfrastructureError {
   constructor(walletId: string, expectedVersion: number) {
-    super(`Wallet ${walletId} was modified concurrently (expected version ${expectedVersion})`);
+    super(`Wallet ${walletId} was modified concurrently (expected version ${expectedVersion})`, 'race');
+  }
+}
+
+export class IntegrityViolationError extends ApplicationError {
+  readonly code = 'INTEGRITY_VIOLATION';
+
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
   }
 }

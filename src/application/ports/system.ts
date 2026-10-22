@@ -24,7 +24,7 @@ export interface LogFields {
 export interface AppLogger {
   debug(message: string, fields?: LogFields): void;
   info(message: string, fields?: LogFields): void;
-  warn(message: string, fields?: LogFields): void;
+  warn(message: string, fields?: LogFields, error?: unknown): void;
   error(message: string, fields?: LogFields, error?: unknown): void;
 }
 
@@ -34,7 +34,7 @@ export interface Metrics {
   transactionSettled(status: string, kind: string, source: ProcessingSource): void;
   duplicateDetected(type: 'idempotent_replay' | 'idempotency_conflict' | 'inbox_duplicate'): void;
   retry(component: 'sqs_consumer' | 'outbox_relay' | 'pending_reference' | 'race'): void;
-  deadLettered(reason: 'permanent' | 'max_receive_count'): void;
+  deadLettered(reason: 'permanent' | 'max_attempts'): void;
   lockConflict(kind: 'lock_timeout' | 'deadlock' | 'unique_race'): void;
   observeProcessingLatency(source: ProcessingSource, seconds: number): void;
   observeLockWait(seconds: number): void;

@@ -25,8 +25,8 @@ export interface WagerTransactionRepository {
   update(transaction: WagerTransaction): Promise<void>;
   hasProcessedReversal(referenceTransactionId: string): Promise<boolean>;
   wakeDependents(providerId: string, externalTransactionId: string, now: Date): Promise<number>;
-  findDuePendingReferences(now: Date, limit: number): Promise<PendingReferenceCandidate[]>;
-  lockDuePendingReference(id: string, now: Date): Promise<WagerTransaction | null>;
+  claimDuePendingReferences(now: Date, limit: number, leaseUntil: Date): Promise<PendingReferenceCandidate[]>;
+  lockPendingReference(id: string): Promise<WagerTransaction | null>;
 }
 
 export interface LedgerSummary {
@@ -46,6 +46,7 @@ export interface LedgerRepository {
 export interface InboxRepository {
   tryReceive(message: InboxMessage): Promise<boolean>;
   find(consumerName: string, messageId: string): Promise<InboxMessage | null>;
+  markProcessed(message: InboxMessage): Promise<void>;
 }
 
 export interface OutboxStats {

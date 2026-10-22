@@ -12,6 +12,17 @@ import { WagerTransactionMapper } from '../mappers';
 import { WagerTransactionRecord } from '../records';
 
 const FRESH = { disableIdentityMap: true } as const;
+const CLAIM_DUE_PENDING_REFERENCES_SQL = `
+  UPDATE wager_transactions
+     SET next_reference_check_at = ?, updated_at = ?
+   WHERE id IN (
+     SELECT id FROM wager_transactions
+      WHERE status = 'PENDING_REFERENCE' AND next_reference_check_at <= ?
+      ORDER BY next_reference_check_at
+      LIMIT ?
+      FOR UPDATE SKIP LOCKED)
+  RETURNING id, wallet_id`;
+
 const REVERSAL_KINDS = [WagerTransactionKind.Refund, WagerTransactionKind.Rollback];
 
 export class MikroOrmWagerTransactionRepository implements WagerTransactionRepository {
@@ -80,19 +91,20 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
     );
   }
 
-  async findDuePendingReferences(now: Date, limit: number): Promise<PendingReferenceCandidate[]> {
-    const records = await this.em.find(
-      WagerTransactionRecord,
-      { status: WagerTransactionStatus.PendingReference, nextReferenceCheckAt: { $lte: now } },
-      { ...FRESH, orderBy: { nextReferenceCheckAt: 'asc' }, limit },
-    );
-    return records.map((record) => ({ transactionId: record.id, walletId: record.walletId }));
+  async claimDuePendingReferences(now: Date, limit: number, leaseUntil: Date): Promise<PendingReferenceCandidate[]> {
+    const rows = await this.em.execute<{ id: string; wallet_id: string }[]>(CLAIM_DUE_PENDING_REFERENCES_SQL, [
+      leaseUntil.toISOString(),
+      now.toISOString(),
+      now.toISOString(),
+      limit,
+    ]);
+    return rows.map((row) => ({ transactionId: row.id, walletId: row.wallet_id }));
   }
 
-  async lockDuePendingReference(id: string, now: Date): Promise<WagerTransaction | null> {
+  async lockPendingReference(id: string): Promise<WagerTransaction | null> {
     const record = await this.em.findOne(
       WagerTransactionRecord,
-      { id, status: WagerTransactionStatus.PendingReference, nextReferenceCheckAt: { $lte: now } },
+      { id, status: WagerTransactionStatus.PendingReference },
       { ...FRESH, lockMode: LockMode.PESSIMISTIC_PARTIAL_WRITE },
     );
     return this.toDomain(record);

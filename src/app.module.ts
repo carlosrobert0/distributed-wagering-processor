@@ -179,6 +179,7 @@ export class AppModule {
               waitTimeSeconds: config.consumer.waitTimeSeconds,
               visibilityTimeoutSeconds: config.consumer.visibilityTimeoutSeconds,
               batchSize: config.consumer.batchSize,
+              maxAttempts: config.consumer.maxAttempts,
               retryBaseSeconds: config.consumer.retryBaseSeconds,
               retryMaxSeconds: config.consumer.retryMaxSeconds,
               shutdownGraceMs: config.consumer.shutdownGraceMs,

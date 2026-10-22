@@ -23,9 +23,12 @@ function outboxRelayWorker(useCase: PublishOutboxUseCase, settings: PollingSetti
       name: 'outbox-relay',
       intervalMs: settings.intervalMs,
       tick: async () => {
-        const result = await useCase.publishBatch(settings.batchSize);
-        await useCase.refreshBacklogMetrics();
-        return result.claimed === settings.batchSize && result.failed === 0;
+        try {
+          const result = await useCase.publishBatch(settings.batchSize);
+          return result.claimed === settings.batchSize && result.failed === 0;
+        } finally {
+          await useCase.refreshBacklogMetrics();
+        }
       },
     },
     logger,

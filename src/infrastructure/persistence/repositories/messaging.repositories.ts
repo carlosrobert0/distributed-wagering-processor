@@ -30,6 +30,14 @@ export class MikroOrmInboxRepository implements InboxRepository {
     const record = await this.em.findOne(InboxMessageRecord, { consumerName, messageId }, { disableIdentityMap: true });
     return record ? InboxMessageMapper.toDomain(record) : null;
   }
+
+  async markProcessed(message: InboxMessage): Promise<void> {
+    await this.em.nativeUpdate(
+      InboxMessageRecord,
+      { consumerName: message.consumerName, messageId: message.messageId },
+      { processedAt: message.processedAt ?? null },
+    );
+  }
 }
 
 interface OutboxStatsRow {
@@ -65,7 +73,7 @@ export class MikroOrmOutboxRepository implements OutboxRepository {
   async save(message: OutboxMessage): Promise<void> {
     await this.em.nativeUpdate(
       OutboxMessageRecord,
-      { id: message.id },
+      { id: message.id, publishedAt: null },
       {
         attempts: message.attempts,
         nextAttemptAt: message.nextAttemptAt ?? null,

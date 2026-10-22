@@ -1,3 +1,4 @@
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 import { GetQueueAttributesCommand, GetQueueUrlCommand, SQSClient } from '@aws-sdk/client-sqs';
 
 export interface SqsConnectionOptions {
@@ -7,12 +8,20 @@ export interface SqsConnectionOptions {
   secretAccessKey: string;
 }
 
+export const SQS_CONNECTION_TIMEOUT_MS = 2_000;
+export const SQS_REQUEST_TIMEOUT_MS = 5_000;
+
 export function createSqsClient(options: SqsConnectionOptions): SQSClient {
   return new SQSClient({
     region: options.region,
     ...(options.endpoint ? { endpoint: options.endpoint } : {}),
     credentials: { accessKeyId: options.accessKeyId, secretAccessKey: options.secretAccessKey },
     maxAttempts: 3,
+    requestHandler: new NodeHttpHandler({
+      connectionTimeout: SQS_CONNECTION_TIMEOUT_MS,
+      requestTimeout: SQS_REQUEST_TIMEOUT_MS,
+      throwOnRequestTimeout: true,
+    }),
   });
 }
 
@@ -32,16 +41,6 @@ export class SqsQueues {
       this.urls.set(queueName, url);
     }
     return url;
-  }
-
-  async maxReceiveCount(queueName: string): Promise<number | undefined> {
-    const result = await this.client.send(
-      new GetQueueAttributesCommand({ QueueUrl: await this.url(queueName), AttributeNames: ['RedrivePolicy'] }),
-    );
-    const policy = result.Attributes?.RedrivePolicy;
-    if (!policy) return undefined;
-    const parsed = JSON.parse(policy) as { maxReceiveCount?: number | string };
-    return parsed.maxReceiveCount !== undefined ? Number(parsed.maxReceiveCount) : undefined;
   }
 
   async ping(queueName: string): Promise<void> {

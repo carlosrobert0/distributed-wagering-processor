@@ -42,12 +42,12 @@ export class PinoAppLogger implements AppLogger {
     this.logger.info(clean(fields), message);
   }
 
-  warn(message: string, fields?: LogFields): void {
-    this.logger.warn(clean(fields), message);
+  warn(message: string, fields?: LogFields, error?: unknown): void {
+    this.logger.warn(withError(fields, error), message);
   }
 
   error(message: string, fields?: LogFields, error?: unknown): void {
-    this.logger.error({ ...clean(fields), ...(error !== undefined ? { err: serializeError(error) } : {}) }, message);
+    this.logger.error(withError(fields, error), message);
   }
 }
 
@@ -78,6 +78,10 @@ export class PinoNestLogger implements LoggerService {
 function clean(fields: LogFields | undefined): Record<string, unknown> {
   if (!fields) return {};
   return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined));
+}
+
+function withError(fields: LogFields | undefined, error: unknown): Record<string, unknown> {
+  return { ...clean(fields), ...(error !== undefined ? { err: serializeError(error) } : {}) };
 }
 
 function serializeError(error: unknown): Record<string, unknown> {
