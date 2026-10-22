@@ -59,8 +59,8 @@ bun test                    # tudo
 ```
 
 Cada arquivo de teste recebe um banco próprio, clonado de um template já migrado
-(`CREATE DATABASE … TEMPLATE`), e suas próprias filas — nenhum teste enxerga dados de outro. O timeout
-padrão dos testes (120 s) está em `bunfig.toml`.
+(`CREATE DATABASE … TEMPLATE`), e suas próprias filas — nenhum teste enxerga dados de outro. O preload
+`test/support/setup.ts` (via `bunfig.toml`) define o timeout padrão de 120 s e fecha os pools ao final.
 Para ver os logs das instâncias filhas: `TEST_INSTANCE_OUTPUT=1`; para logs da app em processo:
 `TEST_LOG_LEVEL=info`.
 

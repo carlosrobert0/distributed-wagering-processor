@@ -160,9 +160,10 @@ domínio imediatamente; o identity map não agregaria e poderia servir dado velh
 - **Por que não SERIALIZABLE?** Toda escrita de saldo já passa pelo lock da wallet, e as corridas
   restantes (mesma idempotency key em wallets diferentes, por exemplo) são resolvidas por `UNIQUE`.
   SERIALIZABLE adicionaria aborts de serialização sem ganho de correção.
-- **Ordem de lock (sem deadlock):** sempre wallet → transação. O worker de PENDING_REFERENCE trava a
-  wallet primeiro e só então a linha pendente (com `SKIP LOCKED`), igual ao caminho de entrada.
-  Deadlocks residuais (detectados pelo Postgres) viram erro transitório e são re-tentados.
+- **Ordem de lock (sem deadlock):** quem espera por lock sempre trava wallet → transação. A única
+  exceção é a reivindicação de candidatas do worker (`UPDATE … WHERE id IN (… FOR UPDATE SKIP LOCKED)`),
+  que trava linhas de transação sem a wallet — mas com `SKIP LOCKED` ela nunca espera, logo não fecha
+  ciclo. Deadlocks residuais (detectados pelo Postgres) viram erro transitório e são re-tentados.
 
 **Corridas entre instâncias que o lock da wallet não cobre** — ex.: a mesma idempotency key enviada
 para duas wallets diferentes — terminam em violação de `UNIQUE`; o use case captura
@@ -226,7 +227,9 @@ aplicação grava sempre transação → lançamento → saldo.
 wallet). Sem isso, o replay de uma rejeição `CURRENCY_MISMATCH` devolveria o saldo BRL rotulado com a
 moeda USD da transação.
 
-Migration única e reversível (`up` cria tudo; `down` derruba na ordem inversa) — testada com up → down → up.
+Migrations versionadas e reversíveis: `Migration20261021000000_initial_schema` (domínio, ledger,
+inbox, outbox) e `Migration20261022000000_consumer_message_attempts` (contagem de tentativas do
+consumer). Testadas com up → down → up.
 
 ---
 
@@ -234,7 +237,9 @@ Migration única e reversível (`up` cria tudo; `down` derruba na ordem inversa)
 
 Regras do §7 implementadas em `settleWagerTransaction` (domínio). Ordem de validação da referência:
 `REFERENCE_NOT_PROCESSED` → `REFERENCE_MISMATCH` (provider/player/wallet/rodada/moeda) →
-`INVALID_REFERENCE_KIND` → `AMOUNT_MISMATCH` → `ALREADY_REVERSED`.
+`INVALID_REFERENCE_KIND` → (WIN/LOSS) `REFERENCE_REVERSED` | (REFUND/ROLLBACK) `AMOUNT_MISMATCH` →
+`ALREADY_REVERSED`. Depois, regras de saldo: `INSUFFICIENT_FUNDS` / `REVERSAL_WOULD_OVERDRAW` no débito e
+`BALANCE_LIMIT_EXCEEDED` no crédito.
 
 - **ROLLBACK** aplica o inverso da direção da referência (BET→CREDIT, WIN→DEBIT, REFUND→DEBIT).
 - **Débito que deixaria saldo negativo:** `INSUFFICIENT_FUNDS` para aposta; `REVERSAL_WOULD_OVERDRAW`
@@ -244,8 +249,12 @@ Regras do §7 implementadas em `settleWagerTransaction` (domínio). Ordem de val
 
 **PENDING_REFERENCE (§7.1):**
 - Referência ausente (ou presente mas ainda pendente) → persiste `PENDING_REFERENCE` + evento.
-- Worker agendado (em todas as instâncias) busca as vencidas e processa cada uma em sua própria
-  transação, com `SKIP LOCKED`.
+- Worker agendado (em todas as instâncias): reivindica as vencidas de forma atômica
+  (`UPDATE … SET next_reference_check_at = now + 30s WHERE id IN (… FOR UPDATE SKIP LOCKED) RETURNING`).
+  O valor do lease funciona como **token**: ao processar, a linha só é travada se ainda tiver exatamente
+  aquele `next_reference_check_at` — se o lease expirou e outra instância a pegou, ou se ela foi
+  "acordada", esta instância desiste. O lote também para antes do lease expirar. Assim cada verificação
+  conta uma tentativa só uma vez.
 - Backoff: 2s·2ⁿ, teto 5 min, **8 verificações (~8,5 min)**. Justificativa: provedores reenviam a
   referência em segundos; uma janela longa deixaria rodadas abertas e o jogador sem resposta.
   Esgotou → `REJECTED REFERENCE_NOT_FOUND` + `WagerTransactionRejected`.
@@ -277,11 +286,12 @@ Regras do §7 implementadas em `settleWagerTransaction` (domínio). Ordem de val
 | Transitório | banco fora, lock/statement timeout, deadlock, corrida de unicidade, erro desconhecido | `ChangeMessageVisibility` com backoff exponencial (2s → 120s) |
 | Permanente | JSON malformado, envelope inválido, payload inválido, `INBOX_MESSAGE_CONFLICT`, violação de integridade ou invariante | copia para a DLQ com o motivo + ack |
 
-- **Limite de tentativas na aplicação:** ao atingir `CONSUMER_MAX_ATTEMPTS` (5), a própria aplicação copia a
-  mensagem para a DLQ com o motivo (`MAX_ATTEMPTS_EXCEEDED: …`) e faz ack. A redrive policy
-  (`maxReceiveCount = 20`) fica só como rede de segurança: como as mensagens seguintes do mesmo grupo FIFO
-  também acumulam `ApproximateReceiveCount` enquanto esperam, depender só do redrive mandaria mensagens
-  saudáveis do grupo para a DLQ junto com a que falhou.
+- **Limite de tentativas na aplicação:** cada falha transitória é registrada em
+  `consumer_message_attempts (consumer_name, message_id)` numa transação própria (sobrevive ao rollback
+  do processamento). Ao atingir `CONSUMER_MAX_ATTEMPTS` (5), a aplicação copia a mensagem para a DLQ com o
+  motivo (`MAX_ATTEMPTS_EXCEEDED: …`) e faz ack. Conta-se tentativa **real**, não `ApproximateReceiveCount`:
+  mensagens irmãs do mesmo grupo FIFO acumulam recebimentos enquanto esperam e iriam para a DLQ sem
+  nunca terem falhado. A redrive policy (`maxReceiveCount = 20`) fica como rede de segurança.
 - **Heartbeat de visibilidade:** enquanto um lote é processado, a visibilidade das mensagens ainda não
   finalizadas é estendida a cada `visibilityTimeout/2`, para que um grupo lento não seja reentregue a
   outra instância no meio do processamento.
@@ -314,9 +324,10 @@ inbox (e a idempotency key) → só faz ack. Testado com um processo real morto 
   **Nunca desiste** (INT-08): descartar violaria "não perder eventos confirmados". O atraso aparece em
   `wagering_outbox_lag_seconds`.
 - **Destino (INT-09):** `wagering-events.fifo`, `MessageGroupId = walletId`.
-- **Ordem (INT-15):** dentro de um lote, em ordem de `occurred_at`, parando no primeiro erro (o resto do lote
-  é devolvido). Entre relays concorrentes a ordem por wallet é melhor esforço; `WalletBalanceChanged` traz
-  `walletVersion` para o consumidor ordenar/descartar.
+- **Ordem (INT-15):** dentro de um lote, em ordem de `occurred_at`; no primeiro erro, o evento que falhou
+  e todo o resto do lote recebem o **mesmo** `next_attempt_at`, então eventos mais novos de uma wallet não
+  passam à frente do que falhou. Entre relays concorrentes a ordem por wallet é melhor esforço;
+  `WalletBalanceChanged` traz `walletVersion` para o consumidor ordenar/descartar.
 
 **Eventos:** `WagerTransactionProcessed` (inclusive LOSS e OPENING), `WagerTransactionRejected`,
 `WalletBalanceChanged` (somente quando o saldo muda), `WagerTransactionPendingReference`. Envelope =
@@ -420,8 +431,9 @@ Ligar a autenticação = registrar outra implementação da porta, sem tocar em 
 ## 15. Trade-offs e limitações conhecidas
 
 - **Throughput por wallet é serializado** (lock pessimista). Correto para dinheiro; escala por wallets.
-- **Lease da outbox (60 s):** se uma publicação demorar mais que o lease, outra instância pode republicar o
-  evento — continua at-least-once com o mesmo `eventId`.
+- **Lease da outbox (60 s):** o relay para de publicar 10 s antes do lease expirar e devolve o resto; se
+  ainda assim uma publicação passar do lease, outra instância pode republicar o evento — continua
+  at-least-once com o mesmo `eventId`, e a gravação só acontece se o evento ainda não foi publicado.
 - **Head-of-line entre grupos:** o consumer só busca o próximo lote quando o atual termina; um grupo lento
   atrasa os demais da mesma instância (outras instâncias seguem consumindo).
 - **Crescimento de `outbox_messages` e `inbox_messages`:** não há job de retenção. Em produção:
