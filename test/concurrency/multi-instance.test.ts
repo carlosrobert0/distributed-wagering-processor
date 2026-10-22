@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { prepareTestDatabase, waitFor } from '../support/environment';
-import { spawnInstance, SpawnedInstance } from '../support/app';
+import { killSpawnedInstances, spawnInstance, SpawnedInstance } from '../support/app';
 import {
   countRows,
   expectAllWalletsMatchLedger,
@@ -36,6 +36,7 @@ describe('3 instâncias simultâneas', () => {
 
   afterAll(async () => {
     await Promise.all(instances.map((instance) => instance.stop()));
+    await killSpawnedInstances();
     await queues.cleanup();
   });
 
@@ -108,6 +109,8 @@ describe('3 instâncias simultâneas', () => {
       expect(await walletRow(wallet.id)).toMatchObject({ balance: '92.00', version: 9 });
       await expectWalletMatchesLedger(wallet.id);
     }
+    expect(await approximateCounts(queues.wagerTransactionsDlq)).toEqual({ visible: 0, inFlight: 0 });
+    expect(await countRows(`SELECT COUNT(*) FROM inbox_messages WHERE message_id LIKE 'msg-%'`)).toBe(5 * 8 * 2);
   });
 
   test('3 relays de outbox concorrentes publicam cada evento uma única vez', async () => {

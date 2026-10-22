@@ -354,4 +354,63 @@ describe('settleWagerTransaction — regras de negócio (§7)', () => {
       expect(settle(wallet, rollback, found(pendingRefund))).toEqual({ type: 'pending-reference', firstTime: true });
     });
   });
+
+  describe('regras adicionais da revisão', () => {
+    test('player diferente do dono: rejeita sem expor o saldo da wallet alheia (INT-14)', () => {
+      const wallet = openWallet('100.00');
+      const tx = newTransaction(wallet, { playerId: 'intruder' });
+      settle(wallet, tx);
+      expect(tx.failureCode).toBe(FailureCode.PlayerWalletMismatch);
+      expect(tx.balanceAfter).toBeUndefined();
+    });
+
+    test('moeda divergente: saldo observado vem na moeda da wallet', () => {
+      const wallet = openWallet('100.00');
+      const tx = newTransaction(wallet, { money: usd('1.00') });
+      settle(wallet, tx);
+      expect(tx.balanceAfter?.toJSON()).toEqual({ amount: '100.00', currency: 'BRL' });
+    });
+
+    test('WIN referenciando BET já revertida → REFERENCE_REVERSED (INT-13)', () => {
+      const wallet = openWallet('100.00');
+      const bet = applied(wallet, { externalTransactionId: 'bet-1', money: brl('10.00') });
+      const win = newTransaction(wallet, { kind: WagerTransactionKind.Win, referenceExternalTransactionId: 'bet-1' });
+      expect(settle(wallet, win, found(bet, true))).toEqual({
+        type: 'rejected',
+        failureCode: FailureCode.ReferenceReversed,
+      });
+      expect(win.referenceTransactionId).toBe(bet.id);
+    });
+
+    test('rejeição de reversão guarda a referência resolvida (auditoria)', () => {
+      const wallet = openWallet('100.00');
+      const bet = applied(wallet, { externalTransactionId: 'bet-1', money: brl('40.00') });
+      const refund = newTransaction(wallet, {
+        kind: WagerTransactionKind.Refund,
+        referenceExternalTransactionId: 'bet-1',
+        money: brl('1.00'),
+      });
+      settle(wallet, refund, found(bet));
+      expect(refund.failureCode).toBe(FailureCode.AmountMismatch);
+      expect(refund.referenceTransactionId).toBe(bet.id);
+    });
+
+    test('crédito que ultrapassaria NUMERIC(20,2) → BALANCE_LIMIT_EXCEEDED, sem lançamento', () => {
+      const wallet = openWallet('999999999999999999.00');
+      const win = newTransaction(wallet, { kind: WagerTransactionKind.Win, money: brl('1.00') });
+      expect(settle(wallet, win)).toEqual({ type: 'rejected', failureCode: FailureCode.BalanceLimitExceeded });
+      expect(wallet.version).toBe(1);
+    });
+
+    test('referência expirada é rejeitada com o saldo observado', () => {
+      const wallet = openWallet('100.00');
+      const refund = newTransaction(wallet, { kind: WagerTransactionKind.Refund, referenceExternalTransactionId: 'x' });
+      settle(wallet, refund, { found: false });
+      settle(wallet, refund, { found: false });
+      settle(wallet, refund, { found: false });
+      settle(wallet, refund, { found: false });
+      expect(refund.failureCode).toBe(FailureCode.ReferenceNotFound);
+      expect(refund.balanceAfter?.toJSON().amount).toBe('100.00');
+    });
+  });
 });

@@ -58,6 +58,7 @@ describe('100.00 − 80.00 − 80.00 em paralelo', () => {
     const responses = await Promise.all(
       Array.from({ length: 40 }, () => ctx.api.submit(wager(wallet, { amount: '5.00' }))),
     );
+    expect(responses.filter((r) => r.status >= 500)).toEqual([]);
     expect(responses.filter((r) => r.status === 201)).toHaveLength(20);
     expect(responses.filter((r) => r.status === 422 && r.body.failureCode === 'INSUFFICIENT_FUNDS')).toHaveLength(20);
     expect(await walletRow(wallet.id)).toMatchObject({ balance: '0.00', version: 21 });

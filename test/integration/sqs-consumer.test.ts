@@ -187,8 +187,9 @@ describe('consumer SQS — limite de tentativas e DLQ por redrive (AC-SQS-06)', 
 
   beforeAll(async () => {
     await prepareTestDatabase();
-    queues = await createTestQueues({ maxReceiveCount: 2 });
+    queues = await createTestQueues({ maxReceiveCount: 20 });
     ctx = await startTestApp(queues, {
+      CONSUMER_MAX_ATTEMPTS: '2',
       DB_LOCK_TIMEOUT_MS: '200',
       CONSUMER_RETRY_BASE_SECONDS: '1',
       CONSUMER_RETRY_MAX_SECONDS: '1',
@@ -202,7 +203,7 @@ describe('consumer SQS — limite de tentativas e DLQ por redrive (AC-SQS-06)', 
     await queues.cleanup();
   });
 
-  test('falha transitória persistente vai para a DLQ após maxReceiveCount, sem efeito no saldo', async () => {
+  test('falha transitória persistente vai para a DLQ ao atingir o limite de tentativas, com motivo e sem efeito', async () => {
     const wallet = await ctx.api.createWallet('100.00');
     const data = betMessage(wallet, '10.00');
     const lock = await holdWalletLock(wallet.id);
@@ -216,6 +217,7 @@ describe('consumer SQS — limite de tentativas e DLQ por redrive (AC-SQS-06)', 
         { timeoutMs: 30_000, description: 'message in DLQ' },
       );
       expect(JSON.parse(dead[0]!.Body!).data.externalTransactionId).toBe(data.externalTransactionId);
+      expect(dead[0]!.MessageAttributes?.deadLetterReason?.StringValue).toMatch(/^MAX_ATTEMPTS_EXCEEDED after 2/);
     } finally {
       await lock.release();
     }
@@ -225,6 +227,7 @@ describe('consumer SQS — limite de tentativas e DLQ por redrive (AC-SQS-06)', 
     const metrics = await fetch(`${ctx.api.baseUrl}/metrics`).then((r) => r.text());
     expect(metrics).toMatch(/wagering_retries_total\{[^}]*component="sqs_consumer"[^}]*\} [1-9]/);
     expect(metrics).toMatch(/wagering_lock_conflicts_total\{[^}]*kind="lock_timeout"[^}]*\} [1-9]/);
+    expect(metrics).toMatch(/wagering_dlq_messages_total\{[^}]*reason="max_attempts"[^}]*\} 1/);
   });
 });
 
@@ -243,40 +246,40 @@ describe('consumer SQS — shutdown gracioso (AC-SQS-07)', () => {
     await queues.cleanup();
   });
 
-  test('parar no meio do lote não perde nem duplica: o resto volta para a fila e é processado depois', async () => {
+  test('parar no meio do lote: a mensagem em andamento termina, as demais voltam para a fila, nada duplica', async () => {
     const wallet = await ctx.api.createWallet('100.00');
-    const messages = Array.from({ length: 8 }, () => betMessage(wallet, '1.00'));
-    for (const message of messages) {
-      await sendWagerMessage(queues.wagerTransactions, message);
+    for (let i = 0; i < 8; i++) {
+      await sendWagerMessage(queues.wagerTransactions, betMessage(wallet, '1.00'));
     }
+    const betsProcessed = async () =>
+      Number(
+        (
+          await db.query<{ c: number }>(
+            `SELECT COUNT(*)::int AS c FROM wager_transactions WHERE wallet_id = $1 AND kind = 'BET'`,
+            [wallet.id],
+          )
+        ).rows[0]!.c,
+      );
+
+    const lock = await holdWalletLock(wallet.id);
+    ctx.consumer.start();
+    await waitFor(async () => (await approximateCounts(queues.wagerTransactions)).inFlight > 0, {
+      description: 'batch received',
+    });
+    await sleep(500);
+    const stopping = ctx.consumer.stop();
+    await sleep(300);
+    await lock.release();
+    await stopping;
+
+    expect(await betsProcessed()).toBe(1);
+    await waitFor(async () => (await approximateCounts(queues.wagerTransactions)).visible > 0, {
+      timeoutMs: 5_000,
+      description: 'unstarted messages released immediately',
+    });
 
     ctx.consumer.start();
-    await sleep(150);
-    await ctx.consumer.stop();
-
-    const processedAfterStop = Number(
-      (
-        await db.query<{ c: number }>(
-          `SELECT COUNT(*)::int AS c FROM wager_transactions WHERE wallet_id = $1 AND kind = 'BET'`,
-          [wallet.id],
-        )
-      ).rows[0]!.c,
-    );
-    expect(processedAfterStop).toBeLessThanOrEqual(8);
-
-    ctx.consumer.start();
-    await waitFor(
-      async () =>
-        Number(
-          (
-            await db.query<{ c: number }>(
-              `SELECT COUNT(*)::int AS c FROM wager_transactions WHERE wallet_id = $1 AND kind = 'BET'`,
-              [wallet.id],
-            )
-          ).rows[0]!.c,
-        ) === 8,
-      { timeoutMs: 30_000, description: 'all 8 processed' },
-    );
+    await waitFor(async () => (await betsProcessed()) === 8, { timeoutMs: 30_000, description: 'all 8 processed' });
     await waitFor(() => queueIsEmpty(queues.wagerTransactions), { timeoutMs: 30_000 });
     await ctx.consumer.stop();
 

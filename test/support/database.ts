@@ -1,8 +1,27 @@
 import { expect } from 'bun:test';
-import { Pool, PoolClient } from 'pg';
-import { TEST_DATABASE_URL } from './environment';
+import { Pool, PoolClient, QueryResult, QueryResultRow } from 'pg';
+import { testDatabaseUrl } from './environment';
 
-export const db = new Pool({ connectionString: TEST_DATABASE_URL, max: 10 });
+const pools = new Map<string, Pool>();
+
+function currentPool(): Pool {
+  const url = testDatabaseUrl();
+  let pool = pools.get(url);
+  if (!pool) {
+    pool = new Pool({ connectionString: url, max: 10 });
+    pools.set(url, pool);
+  }
+  return pool;
+}
+
+export const db = {
+  query<R extends QueryResultRow = QueryResultRow>(text: string, params: unknown[] = []): Promise<QueryResult<R>> {
+    return currentPool().query<R>(text, params);
+  },
+  connect(): Promise<PoolClient> {
+    return currentPool().connect();
+  },
+};
 
 export interface WalletRow {
   id: string;

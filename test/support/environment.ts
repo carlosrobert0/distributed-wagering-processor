@@ -5,9 +5,10 @@ import { createOrm } from '../../src/infrastructure/persistence/mikro-orm.config
 
 export const POSTGRES_ADMIN_URL =
   process.env.TEST_POSTGRES_ADMIN_URL ?? 'postgres://wagering:wagering@localhost:5432/postgres';
-export const TEST_DATABASE_NAME = process.env.TEST_DATABASE_NAME ?? 'wagering_test';
-export const TEST_DATABASE_URL = withDatabase(POSTGRES_ADMIN_URL, TEST_DATABASE_NAME);
 export const AWS_ENDPOINT_URL = process.env.AWS_ENDPOINT_URL ?? 'http://localhost:4566';
+
+const TEMPLATE_DATABASE = 'wagering_test_template';
+const TEST_DATABASE_PREFIX = 'wagering_test_';
 
 export function withDatabase(url: string, database: string): string {
   const parsed = new URL(url);
@@ -15,27 +16,59 @@ export function withDatabase(url: string, database: string): string {
   return parsed.toString();
 }
 
-let prepared: Promise<void> | undefined;
+let template: Promise<void> | undefined;
+let currentDatabaseUrl: string | undefined;
 
-export function prepareTestDatabase(): Promise<void> {
-  prepared ??= (async () => {
-    await recreateDatabase(TEST_DATABASE_NAME);
-    const orm = await createOrm({ url: TEST_DATABASE_URL, poolMax: 2 });
-    try {
-      await orm.migrator.up();
-    } finally {
-      await orm.close(true);
+export function testDatabaseUrl(): string {
+  if (!currentDatabaseUrl) {
+    throw new Error('prepareTestDatabase() must run before using the test database');
+  }
+  return currentDatabaseUrl;
+}
+
+export async function prepareTestDatabase(): Promise<string> {
+  template ??= createTemplateDatabase();
+  await template;
+  const name = `${TEST_DATABASE_PREFIX}${randomUUID().replace(/-/g, '').slice(0, 16)}`;
+  await withAdmin((admin) => admin.query(`CREATE DATABASE "${name}" TEMPLATE "${TEMPLATE_DATABASE}"`));
+  currentDatabaseUrl = withDatabase(POSTGRES_ADMIN_URL, name);
+  return currentDatabaseUrl;
+}
+
+async function createTemplateDatabase(): Promise<void> {
+  await dropStaleTestDatabases();
+  await recreateDatabase(TEMPLATE_DATABASE);
+  const orm = await createOrm({ url: withDatabase(POSTGRES_ADMIN_URL, TEMPLATE_DATABASE), poolMax: 2 });
+  try {
+    await orm.migrator.up();
+  } finally {
+    await orm.close(true);
+  }
+}
+
+async function dropStaleTestDatabases(): Promise<void> {
+  await withAdmin(async (admin) => {
+    const { rows } = await admin.query<{ datname: string }>(`SELECT datname FROM pg_database WHERE datname LIKE $1`, [
+      `${TEST_DATABASE_PREFIX}%`,
+    ]);
+    for (const { datname } of rows) {
+      await admin.query(`DROP DATABASE IF EXISTS "${datname}" WITH (FORCE)`);
     }
-  })();
-  return prepared;
+  });
 }
 
 export async function recreateDatabase(name: string): Promise<void> {
+  await withAdmin(async (admin) => {
+    await admin.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
+    await admin.query(`CREATE DATABASE "${name}"`);
+  });
+}
+
+async function withAdmin<T>(work: (admin: Client) => Promise<T>): Promise<T> {
   const admin = new Client({ connectionString: POSTGRES_ADMIN_URL });
   await admin.connect();
   try {
-    await admin.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
-    await admin.query(`CREATE DATABASE "${name}"`);
+    return await work(admin);
   } finally {
     await admin.end();
   }
@@ -49,7 +82,7 @@ export interface TestQueues {
 
 export function testEnv(queues: TestQueues, overrides: Record<string, string> = {}): Record<string, string> {
   return {
-    DATABASE_URL: TEST_DATABASE_URL,
+    DATABASE_URL: testDatabaseUrl(),
     DB_POOL_MAX: '30',
     AWS_ENDPOINT_URL,
     AWS_REGION: 'us-east-1',

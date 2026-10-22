@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { TransientInfrastructureError } from '../../../src/application/errors';
+import { InvariantViolationError } from '../../../src/domain/shared/domain-error';
 import { TransactionScope } from '../../../src/application/ports/unit-of-work';
 import { WagerMessageHandler } from '../../../src/interfaces/sqs/wager-message.handler';
 import { SilentLogger } from '../../support/in-memory';
@@ -23,7 +24,11 @@ describe('WagerMessageHandler', () => {
     const wallet = await ctx.openWallet('100.00');
     const decision = await handler.handle(envelope(ctx.command(wallet), 'msg-1'));
 
-    expect(decision).toEqual({ action: 'ack', committed: true });
+    expect(decision).toMatchObject({
+      action: 'ack',
+      committed: true,
+      context: { messageId: 'msg-1', walletId: wallet.id },
+    });
     expect(ctx.uow.store.inbox.has('consumer/msg-1')).toBe(true);
     expect(ctx.uow.store.wallets.get(wallet.id)!.balance.toJSON().amount).toBe('90.00');
   });
@@ -33,17 +38,17 @@ describe('WagerMessageHandler', () => {
     const body = envelope(ctx.command(wallet), 'msg-2');
     await handler.handle(body);
 
-    expect(await handler.handle(body)).toEqual({ action: 'ack', committed: true });
+    expect(await handler.handle(body)).toMatchObject({ action: 'ack', committed: true });
     expect(ctx.uow.store.ledgerFor(wallet.id)).toHaveLength(2);
   });
 
   test('rejeição de negócio persistida (saldo insuficiente) → ack', async () => {
     const wallet = await ctx.openWallet('1.00');
-    expect(await handler.handle(envelope(ctx.command(wallet)))).toEqual({ action: 'ack', committed: true });
+    expect(await handler.handle(envelope(ctx.command(wallet)))).toMatchObject({ action: 'ack', committed: true });
   });
 
   test('wallet inexistente e conflito de key → ack sem commit', async () => {
-    expect(await handler.handle(envelope(ctx.command({ id: randomUUID(), playerId: 'p' })))).toEqual({
+    expect(await handler.handle(envelope(ctx.command({ id: randomUUID(), playerId: 'p' })))).toMatchObject({
       action: 'ack',
       committed: false,
     });
@@ -51,7 +56,7 @@ describe('WagerMessageHandler', () => {
     const wallet = await ctx.openWallet();
     const command = ctx.command(wallet);
     await handler.handle(envelope(command));
-    expect(await handler.handle(envelope({ ...command, money: { amount: '99.00', currency: 'BRL' } }))).toEqual({
+    expect(await handler.handle(envelope({ ...command, money: { amount: '99.00', currency: 'BRL' } }))).toMatchObject({
       action: 'ack',
       committed: false,
     });
@@ -82,9 +87,28 @@ describe('WagerMessageHandler', () => {
     ctx.uow.run = async <T>(_work: (scope: TransactionScope) => Promise<T>): Promise<T> => {
       throw new TransientInfrastructureError('db down', 'connection');
     };
-    expect(await handler.handle(envelope(ctx.command(wallet)))).toEqual({
+    expect(await handler.handle(envelope(ctx.command(wallet)))).toMatchObject({
       action: 'retry',
       reason: 'TRANSIENT_FAILURE',
     });
+  });
+
+  test('mesmo messageId com outro payload → DLQ com INBOX_MESSAGE_CONFLICT, sem novo efeito', async () => {
+    const wallet = await ctx.openWallet('100.00');
+    await handler.handle(envelope(ctx.command(wallet), 'msg-reused'));
+
+    const decision = await handler.handle(envelope(ctx.command(wallet), 'msg-reused'));
+
+    expect(decision.action).toBe('dead-letter');
+    expect(decision.action === 'dead-letter' && decision.reason).toMatch(/^INBOX_MESSAGE_CONFLICT/);
+    expect(ctx.uow.store.ledgerFor(wallet.id)).toHaveLength(2);
+  });
+
+  test('violação de invariante (bug/dado corrompido) → DLQ, não retry infinito', async () => {
+    const wallet = await ctx.openWallet('100.00');
+    ctx.uow.run = async <T>(_work: (scope: TransactionScope) => Promise<T>): Promise<T> => {
+      throw new InvariantViolationError('corrupted ledger');
+    };
+    expect((await handler.handle(envelope(ctx.command(wallet)))).action).toBe('dead-letter');
   });
 });

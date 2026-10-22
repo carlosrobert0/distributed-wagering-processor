@@ -46,6 +46,14 @@ export interface SpawnedInstance {
 }
 
 let nextPort = 39_000 + Math.floor(Math.random() * 1_000);
+const spawned = new Set<Subprocess>();
+
+export async function killSpawnedInstances(): Promise<void> {
+  const children = [...spawned];
+  spawned.clear();
+  children.forEach((child) => child.kill('SIGKILL'));
+  await Promise.all(children.map((child) => child.exited));
+}
 
 export async function spawnInstance(
   name: string,
@@ -55,12 +63,14 @@ export async function spawnInstance(
 ): Promise<SpawnedInstance> {
   const port = nextPort++;
   const env = testEnv(queues, { PORT: String(port), INSTANCE_ID: name, ...overrides });
-  const child = Bun.spawn(['bun', 'run', 'src/main.ts'], {
+  const child = Bun.spawn([process.execPath, 'run', 'src/main.ts'], {
     cwd: PROJECT_ROOT,
     env: { ...process.env, ...env },
     stdout: process.env.TEST_INSTANCE_OUTPUT ? 'inherit' : 'ignore',
     stderr: process.env.TEST_INSTANCE_OUTPUT ? 'inherit' : 'ignore',
   });
+  spawned.add(child);
+  void child.exited.then(() => spawned.delete(child));
   const api = new ApiClient(`http://127.0.0.1:${port}`);
   const instance: SpawnedInstance = {
     name,

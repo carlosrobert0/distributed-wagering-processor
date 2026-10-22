@@ -11,12 +11,12 @@ import { PrometheusMetrics } from '../../src/infrastructure/observability/promet
 import { createOrm } from '../../src/infrastructure/persistence/mikro-orm.config';
 import { MikroOrmUnitOfWork } from '../../src/infrastructure/persistence/mikro-orm-unit-of-work';
 import { SystemClock, UuidV7Generator } from '../../src/infrastructure/system/system-adapters';
-import { TEST_DATABASE_URL } from './environment';
+import { testDatabaseUrl } from './environment';
 
 export async function buildUseCases(
   options: { lockTimeoutMs?: number; referencePolicy?: ExponentialBackoff; poolMax?: number } = {},
 ) {
-  const orm: MikroORM = await createOrm({ url: TEST_DATABASE_URL, poolMax: options.poolMax ?? 20 });
+  const orm: MikroORM = await createOrm({ url: testDatabaseUrl(), poolMax: options.poolMax ?? 20 });
   const metrics = new PrometheusMetrics({ collectDefaults: false });
   const logger = new PinoAppLogger(pino({ level: process.env.TEST_LOG_LEVEL ?? 'silent' }));
   const ids = new UuidV7Generator();

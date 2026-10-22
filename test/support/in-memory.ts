@@ -190,7 +190,7 @@ class InMemoryWagerTransactionRepository implements WagerTransactionRepository {
     return [...this.store.transactions.values()].some(
       (tx) =>
         tx.referenceTransactionId === referenceTransactionId &&
-        tx.isReversal() &&
+        tx.requiresReference() &&
         tx.status === WagerTransactionStatus.Processed,
     );
   }
@@ -210,18 +210,17 @@ class InMemoryWagerTransactionRepository implements WagerTransactionRepository {
     return woken;
   }
 
-  async findDuePendingReferences(now: Date, limit: number): Promise<PendingReferenceCandidate[]> {
-    return [...this.store.transactions.values()]
+  async claimDuePendingReferences(now: Date, limit: number, leaseUntil: Date): Promise<PendingReferenceCandidate[]> {
+    const due = [...this.store.transactions.values()]
       .filter((tx) => tx.status === WagerTransactionStatus.PendingReference && this.isDue(tx, now))
-      .slice(0, limit)
-      .map((tx) => ({ transactionId: tx.id, walletId: tx.walletId }));
+      .slice(0, limit);
+    due.forEach((tx) => this.store.transactions.set(tx.id, cloneTransaction(tx, { nextReferenceCheckAt: leaseUntil })));
+    return due.map((tx) => ({ transactionId: tx.id, walletId: tx.walletId }));
   }
 
-  async lockDuePendingReference(id: string, now: Date): Promise<WagerTransaction | null> {
+  async lockPendingReference(id: string): Promise<WagerTransaction | null> {
     const tx = this.store.transactions.get(id);
-    return tx && tx.status === WagerTransactionStatus.PendingReference && this.isDue(tx, now)
-      ? cloneTransaction(tx)
-      : null;
+    return tx && tx.status === WagerTransactionStatus.PendingReference ? cloneTransaction(tx) : null;
   }
 
   private isDue(tx: WagerTransaction, now: Date): boolean {
@@ -283,6 +282,10 @@ class InMemoryInboxRepository implements InboxRepository {
   async find(consumerName: string, messageId: string): Promise<InboxMessage | null> {
     return this.store.inbox.get(`${consumerName}/${messageId}`) ?? null;
   }
+
+  async markProcessed(message: InboxMessage): Promise<void> {
+    this.store.inbox.set(`${message.consumerName}/${message.messageId}`, message);
+  }
 }
 
 class InMemoryOutboxRepository implements OutboxRepository {
@@ -301,6 +304,9 @@ class InMemoryOutboxRepository implements OutboxRepository {
   }
 
   async save(message: OutboxMessage): Promise<void> {
+    if (this.store.outbox.get(message.id)?.isPending() === false) {
+      return;
+    }
     this.store.outbox.set(message.id, cloneOutbox(message));
   }
 

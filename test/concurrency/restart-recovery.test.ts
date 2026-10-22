@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { prepareTestDatabase, sleep, waitFor } from '../support/environment';
-import { spawnInstance } from '../support/app';
+import { killSpawnedInstances, spawnInstance } from '../support/app';
 import { countRows, expectAllWalletsMatchLedger, expectWalletMatchesLedger, walletRow } from '../support/database';
 import { WagerBody, wager } from '../support/http';
 import { approximateCounts, createTestQueues, sendWagerMessage } from '../support/sqs';
@@ -14,7 +14,10 @@ describe('reinício com consistência final', () => {
     queues = await createTestQueues({ visibilityTimeoutSeconds: 3 });
   });
 
-  afterAll(() => queues.cleanup());
+  afterAll(async () => {
+    await killSpawnedInstances();
+    await queues.cleanup();
+  });
 
   test('SIGKILL no meio da carga → nova instância converge para o estado correto', async () => {
     const workerEnv = {

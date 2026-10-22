@@ -1,5 +1,6 @@
 import {
   CreateQueueCommand,
+  DeleteMessageBatchCommand,
   DeleteQueueCommand,
   GetQueueAttributesCommand,
   GetQueueUrlCommand,
@@ -136,14 +137,26 @@ export async function peekMessages(queueName: string, waitSeconds = 1, visibilit
   return result.Messages ?? [];
 }
 
-export async function drainMessages(queueName: string, visibilitySeconds = 60): Promise<Message[]> {
-  const all: Message[] = [];
-  for (let round = 0; round < 50; round++) {
-    const batch = await peekMessages(queueName, 1, visibilitySeconds);
-    if (batch.length === 0) break;
-    all.push(...batch);
+export async function drainMessages(queueName: string, options: { emptyReceives?: number } = {}): Promise<Message[]> {
+  const url = await queueUrl(queueName);
+  const drained = new Map<string, Message>();
+  let consecutiveEmpty = 0;
+  while (consecutiveEmpty < (options.emptyReceives ?? 2)) {
+    const batch = await peekMessages(queueName, 1, 30);
+    if (batch.length === 0) {
+      consecutiveEmpty += 1;
+      continue;
+    }
+    consecutiveEmpty = 0;
+    batch.forEach((message) => drained.set(message.MessageId!, message));
+    await sqs.send(
+      new DeleteMessageBatchCommand({
+        QueueUrl: url,
+        Entries: batch.map((message, index) => ({ Id: String(index), ReceiptHandle: message.ReceiptHandle })),
+      }),
+    );
   }
-  return all;
+  return [...drained.values()];
 }
 
 export async function approximateCounts(queueName: string): Promise<{ visible: number; inFlight: number }> {

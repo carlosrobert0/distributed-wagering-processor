@@ -27,6 +27,7 @@ describe('a mesma aposta 50× em paralelo', () => {
 
     const responses = await Promise.all(Array.from({ length: 50 }, () => ctx.api.submit(bet)));
 
+    expect(responses.filter((r) => r.status >= 500)).toEqual([]);
     const originals = responses.filter((r) => r.body.idempotentReplay === false);
     const replays = responses.filter((r) => r.body.idempotentReplay === true);
     expect(originals).toHaveLength(1);

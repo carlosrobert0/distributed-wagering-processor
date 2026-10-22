@@ -133,6 +133,18 @@ describe('WagerTransaction (AC-TX)', () => {
       expect(() => tx.markPendingReference(later)).toThrow(InvalidTransactionStateError);
     });
 
+    test('expireReference: PENDING_REFERENCE → REJECTED REFERENCE_NOT_FOUND, contando a tentativa', () => {
+      const tx = newTransaction(wallet, { kind: WagerTransactionKind.Refund, referenceExternalTransactionId: 'b' });
+      tx.markPendingReference(later);
+      tx.expireReference({ balanceAfter: brl('100.00'), at: later });
+      expect(tx.status).toBe(WagerTransactionStatus.Rejected);
+      expect(tx.failureCode).toBe(FailureCode.ReferenceNotFound);
+      expect(tx.referenceAttempts).toBe(1);
+      expect(() => newTransaction(wallet).expireReference({ balanceAfter: brl('1.00'), at: later })).toThrow(
+        InvalidTransactionStateError,
+      );
+    });
+
     test('scheduleReferenceRetry só vale em PENDING_REFERENCE', () => {
       expect(() => newTransaction(wallet).scheduleReferenceRetry(later)).toThrow(InvalidTransactionStateError);
     });

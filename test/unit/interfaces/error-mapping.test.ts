@@ -1,8 +1,16 @@
 import { describe, expect, mock, test } from 'bun:test';
 import { BadRequestException, NotFoundException } from '@nestjs/common';
-import { DeadlockException, LockWaitTimeoutException } from '@mikro-orm/core';
+import {
+  CheckConstraintViolationException,
+  DeadlockException,
+  LockWaitTimeoutException,
+  UniqueConstraintViolationException,
+} from '@mikro-orm/core';
 import {
   ConcurrencyViolationError,
+  DuplicateTransactionError,
+  InboxMessageConflictError,
+  IntegrityViolationError,
   ExternalTransactionConflictError,
   IdempotencyKeyConflictError,
   InvalidPayloadError,
@@ -11,10 +19,10 @@ import {
   WalletAlreadyExistsError,
   WalletNotFoundError,
 } from '../../../src/application/errors';
-import { InvalidMoneyError } from '../../../src/domain/shared/domain-error';
+import { InvalidMoneyError, InvariantViolationError } from '../../../src/domain/shared/domain-error';
 import { WagerTransactionStatus } from '../../../src/domain/wagering/wager-transaction';
 import { loadConfig } from '../../../src/infrastructure/config/app-config';
-import { toTransientError } from '../../../src/infrastructure/persistence/database-errors';
+import { toIntegrityError, toTransientError } from '../../../src/infrastructure/persistence/database-errors';
 import { toErrorResponse } from '../../../src/interfaces/http/http-exception.filter';
 import { bodyParserErrorHandler } from '../../../src/interfaces/http/json-body.middleware';
 import { httpStatusFor } from '../../../src/interfaces/http/wagering.controller';
@@ -33,7 +41,9 @@ describe('HTTP: erro → status (consistente em todos os endpoints)', () => {
     [new TransientInfrastructureError('down', 'connection'), 503, 'TRANSIENT_FAILURE'],
     [new BadRequestException('bad json'), 400, 'INVALID_PAYLOAD'],
     [new NotFoundException(), 404, 'NOT_FOUND'],
-    [new ConcurrencyViolationError('w', 1), 500, 'CONCURRENCY_VIOLATION'],
+    [new ConcurrencyViolationError('w', 1), 503, 'TRANSIENT_FAILURE'],
+    [new DuplicateTransactionError('wager_tx_idempotency_key_uq'), 503, 'TRANSIENT_FAILURE'],
+    [new IntegrityViolationError('ledger chain broken'), 500, 'INTEGRITY_VIOLATION'],
     [new Error('boom'), 500, 'INTERNAL_ERROR'],
   ])('%p → %i %s', (exception, status, error) => {
     const response = toErrorResponse(exception);
@@ -78,6 +88,10 @@ describe('SQS: classificação de erros', () => {
     [new IdempotencyKeyConflictError('k'), 'business'],
     [new WalletNotFoundError('w'), 'business'],
     [new TransientInfrastructureError('down', 'lock_timeout'), 'transient'],
+    [new DuplicateTransactionError(), 'transient'],
+    [new InboxMessageConflictError('consumer', 'msg-1'), 'permanent'],
+    [new IntegrityViolationError('check failed'), 'permanent'],
+    [new InvariantViolationError('unbalanced entry'), 'permanent'],
     [new Error('unknown'), 'transient'],
   ])('%p → %s', (error, expected) => {
     expect<string>(classify(error)).toBe(expected);
@@ -87,7 +101,7 @@ describe('SQS: classificação de erros', () => {
 describe('Postgres: erro → transitório', () => {
   test.each([
     ['55P03', 'lock_timeout'],
-    ['57014', 'lock_timeout'],
+    ['57014', 'statement_timeout'],
     ['40001', 'deadlock'],
     ['40P01', 'deadlock'],
     ['57P01', 'connection'],
@@ -105,6 +119,13 @@ describe('Postgres: erro → transitório', () => {
 
   test('violação de constraint não é transitória', () => {
     expect(toTransientError(Object.assign(new Error('unique'), { code: '23505' }))).toBeUndefined();
+  });
+
+  test('violação de CHECK vira IntegrityViolationError; unicidade não', () => {
+    expect(toIntegrityError(new CheckConstraintViolationException(new Error('ledger chain broken')))).toBeInstanceOf(
+      IntegrityViolationError,
+    );
+    expect(toIntegrityError(new UniqueConstraintViolationException(new Error('duplicate key')))).toBeUndefined();
   });
 });
 

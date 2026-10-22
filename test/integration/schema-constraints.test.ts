@@ -74,8 +74,9 @@ async function insertTx(c: PoolClient, tx: TxSeed): Promise<void> {
   await c.query(
     `INSERT INTO wager_transactions (id, provider_id, external_transaction_id, idempotency_key, payload_hash,
        wallet_id, player_id, round_id, game_id, kind, amount, currency, reference_external_transaction_id,
-       reference_transaction_id, status, balance_after, created_at, processed_at, updated_at)
-     VALUES ($1, $2, $3, $4, repeat('a', 64), $5, $6, 'round-1', 'game', $7, $8, 'BRL', $9, $10, $11, $12, now(), now(), now())`,
+       reference_transaction_id, status, balance_after, balance_currency, created_at, processed_at, updated_at)
+     VALUES ($1, $2, $3, $4, repeat('a', 64), $5, $6, 'round-1', 'game', $7, $8, 'BRL', $9, $10, $11, $12::numeric,
+       CASE WHEN $12::numeric IS NULL THEN NULL ELSE 'BRL' END, now(), now(), now())`,
     [
       tx.id,
       providerId,
@@ -310,9 +311,9 @@ describe('constraints do schema (§5 restrição 9)', () => {
         await c.query(
           `INSERT INTO wager_transactions (id, provider_id, external_transaction_id, idempotency_key, payload_hash,
              wallet_id, player_id, round_id, game_id, kind, amount, currency, status, failure_code, balance_after,
-             created_at, processed_at, updated_at)
+             balance_currency, created_at, processed_at, updated_at)
            VALUES ($1, 'provider-a', $2, $2, repeat('a', 64), $3, $4, 'r', 'g', 'BET', 500.00, 'BRL', 'REJECTED',
-             'INSUFFICIENT_FUNDS', 70.00, now(), now(), now())`,
+             'INSUFFICIENT_FUNDS', 70.00, 'BRL', now(), now(), now())`,
           [txId, `ext-${txId}`, seed.walletId, seed.playerId],
         );
         await insertEntry(c, {
@@ -444,6 +445,37 @@ describe('constraints do schema (§5 restrição 9)', () => {
           }),
         /wager_tx_failure_code_ck/,
       );
+    });
+  });
+
+  describe('saldo observado', () => {
+    test('PROCESSED sem saldo observado é recusado', async () => {
+      await expectRejected(
+        (c) =>
+          insertTx(c, {
+            id: randomUUID(),
+            walletId: seed.walletId,
+            playerId: seed.playerId,
+            kind: 'LOSS',
+            amount: '0.00',
+            balanceAfter: null,
+          }),
+        /wager_tx_processed_balance_ck/,
+      );
+    });
+
+    test('saldo sem moeda é recusado', async () => {
+      await expectRejected((c) => {
+        const id = randomUUID();
+        return c.query(
+          `INSERT INTO wager_transactions (id, provider_id, external_transaction_id, idempotency_key, payload_hash,
+             wallet_id, player_id, round_id, game_id, kind, amount, currency, status, failure_code, balance_after,
+             created_at, processed_at, updated_at)
+           VALUES ($1, 'provider-a', $2, $2, repeat('a', 64), $3, $4, 'r', 'g', 'BET', 1.00, 'BRL', 'REJECTED',
+             'INSUFFICIENT_FUNDS', 70.00, now(), now(), now())`,
+          [id, `ext-${id}`, seed.walletId, seed.playerId],
+        );
+      }, /wager_tx_balance_currency_ck/);
     });
   });
 

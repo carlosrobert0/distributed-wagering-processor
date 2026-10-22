@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { prepareTestDatabase, waitFor } from '../support/environment';
-import { spawnInstance, startTestApp } from '../support/app';
+import { killSpawnedInstances, spawnInstance, startTestApp } from '../support/app';
 import { countRows, expectWalletMatchesLedger, ledgerRows, walletRow } from '../support/database';
 import { approximateCounts, createTestQueues, sendWagerMessage } from '../support/sqs';
 
@@ -13,7 +13,10 @@ describe('worker morto entre commit e ack', () => {
     queues = await createTestQueues({ visibilityTimeoutSeconds: 3 });
   });
 
-  afterAll(() => queues.cleanup());
+  afterAll(async () => {
+    await killSpawnedInstances();
+    await queues.cleanup();
+  });
 
   test('redelivery após o crash não duplica o débito', async () => {
     const crashing = await spawnInstance('crashing-instance', queues, {

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import pino from 'pino';
 import { PublishOutboxUseCase } from '../../src/application/messaging/publish-outbox.use-case';
@@ -12,7 +12,7 @@ import { OutboxMessageMapper } from '../../src/infrastructure/persistence/mapper
 import { OutboxMessageRecord } from '../../src/infrastructure/persistence/records';
 import { SystemClock } from '../../src/infrastructure/system/system-adapters';
 import { AWS_ENDPOINT_URL, prepareTestDatabase } from '../support/environment';
-import { countRows, db } from '../support/database';
+import { countRows, db, expectAllWalletsMatchLedger } from '../support/database';
 import { createTestQueues, drainMessages } from '../support/sqs';
 import { buildUseCases } from '../support/use-cases';
 
@@ -32,6 +32,8 @@ describe('outbox relay', () => {
     instanceA = await buildUseCases();
     instanceB = await buildUseCases();
   });
+
+  afterEach(() => expectAllWalletsMatchLedger());
 
   afterAll(async () => {
     await instanceA.close();
@@ -81,6 +83,14 @@ describe('outbox relay', () => {
     return walletIds;
   }
 
+  async function forceDue(walletIds: string[]): Promise<void> {
+    await db.query(
+      `UPDATE outbox_messages SET next_attempt_at = now() - interval '1 minute'
+        WHERE partition_key = ANY($1) AND published_at IS NULL`,
+      [walletIds],
+    );
+  }
+
   async function pendingFor(walletIds: string[]): Promise<number> {
     return countRows(`SELECT COUNT(*) FROM outbox_messages WHERE partition_key = ANY($1) AND published_at IS NULL`, [
       walletIds,
@@ -97,7 +107,7 @@ describe('outbox relay', () => {
       published += (await relay(instanceB).publishBatch(100)).published;
     }
     expect(await pendingFor(walletIds)).toBe(0);
-    expect(published).toBeGreaterThanOrEqual(pending);
+    expect(published).toBe(pending);
 
     const delivered = (await drainMessages(queues.events)).map(
       (m) => JSON.parse(m.Body!) as { eventId: string; eventType: string },
@@ -142,43 +152,54 @@ describe('outbox relay', () => {
     await drainMessages(queues.events);
   });
 
-  test('falha de publicação → attempts++ e backoff; nada é perdido (AC-OUT-07)', async () => {
-    const walletIds = await produceEvents(1, 0);
-    let failures = 0;
+  test('falha de publicação → attempts++ e backoff; o resto do lote é devolvido; nada é perdido (AC-OUT-07)', async () => {
+    const walletIds = await produceEvents(1, 1);
+    let failuresLeft = 2;
     const flaky: EventPublisher = {
       publish: async (message) => {
-        if (failures < 2) {
-          failures += 1;
+        if (failuresLeft > 0) {
+          failuresLeft -= 1;
           throw new Error('SQS unavailable');
         }
         await new SqsEventPublisher(sqsQueues, queues.events).publish(message);
       },
     };
-
     const useCase = relay(instanceA, flaky);
-    const first = await useCase.publishBatch(50);
-    expect(first.failed).toBeGreaterThan(0);
 
-    const { rows } = await db.query<{ attempts: number; last_error: string | null; due_in_future: boolean }>(
-      `SELECT attempts, last_error, next_attempt_at > now() AS due_in_future FROM outbox_messages
-        WHERE partition_key = ANY($1) AND published_at IS NULL`,
+    expect(await useCase.publishBatch(50)).toMatchObject({ published: 0, failed: 1 });
+    const { rows } = await db.query<{ attempts: number; last_error: string | null; backed_off: boolean }>(
+      `SELECT attempts, last_error, next_attempt_at > occurred_at + interval '500 milliseconds' AS backed_off
+         FROM outbox_messages WHERE partition_key = ANY($1) AND published_at IS NULL ORDER BY occurred_at, id`,
       [walletIds],
     );
-    expect(rows.length).toBeGreaterThan(0);
-    expect(rows.every((row) => row.attempts >= 1 && row.last_error === 'SQS unavailable' && row.due_in_future)).toBe(
-      true,
-    );
+    expect(rows).toHaveLength(4);
+    expect(rows[0]).toEqual({ attempts: 1, last_error: 'SQS unavailable', backed_off: true });
+    expect(rows.slice(1).every((row) => row.attempts === 0 && row.last_error === null)).toBe(true);
 
-    await db.query(
-      `UPDATE outbox_messages SET next_attempt_at = now() WHERE partition_key = ANY($1) AND published_at IS NULL`,
-      [walletIds],
-    );
-    for (let i = 0; i < 5 && (await pendingFor(walletIds)) > 0; i++) {
+    for (let i = 0; i < 10 && (await pendingFor(walletIds)) > 0; i++) {
+      await forceDue(walletIds);
       await useCase.publishBatch(50);
-      await db.query(
-        `UPDATE outbox_messages SET next_attempt_at = now() WHERE partition_key = ANY($1) AND published_at IS NULL`,
-        [walletIds],
-      );
+    }
+    expect(await pendingFor(walletIds)).toBe(0);
+    await drainMessages(queues.events);
+  });
+
+  test('relay morto depois do lease e antes de publicar: o lease expira e outra instância publica', async () => {
+    const walletIds = await produceEvents(1, 0);
+    const leased = await instanceA.uow.run(async (scope) => {
+      const claimed = await scope.outbox.claimDue(new Date(), 50);
+      for (const message of claimed) {
+        message.lease(new Date(Date.now() + 60_000));
+        await scope.outbox.save(message);
+      }
+      return claimed.length;
+    });
+    expect(leased).toBeGreaterThan(0);
+
+    expect((await relay(instanceB).publishBatch(50)).claimed).toBe(0);
+    await forceDue(walletIds);
+    for (let i = 0; i < 5 && (await pendingFor(walletIds)) > 0; i++) {
+      await relay(instanceB).publishBatch(50);
     }
     expect(await pendingFor(walletIds)).toBe(0);
     await drainMessages(queues.events);

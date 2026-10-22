@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   DuplicateTransactionError,
   ExternalTransactionConflictError,
+  InboxMessageConflictError,
   IdempotencyKeyConflictError,
   InvalidPayloadError,
   WalletNotFoundError,
@@ -133,6 +134,31 @@ describe('ProcessWagerTransactionUseCase', () => {
     expect(again.idempotentReplay).toBe(true);
     expect(ctx.metrics.count('duplicate:inbox_duplicate')).toBe(1);
     expect(ctx.uow.store.inbox.size).toBe(1);
+    expect(ctx.uow.store.ledgerFor(wallet.id)).toHaveLength(2);
+  });
+
+  test('inbox é marcada como processada na mesma transação do efeito', async () => {
+    const wallet = await ctx.openWallet('100.00');
+    await ctx.processWager.execute(ctx.command(wallet), {
+      correlationId: 'c',
+      source: 'sqs',
+      inbox: { consumerName: 'consumer', messageId: 'msg-ok', payloadHash: 'a'.repeat(64) },
+    });
+    expect(ctx.uow.store.inbox.get('consumer/msg-ok')?.isProcessed()).toBe(true);
+  });
+
+  test('mesmo messageId com payload diferente → InboxMessageConflictError e nenhum efeito', async () => {
+    const wallet = await ctx.openWallet('100.00');
+    const inbox = { consumerName: 'consumer', messageId: 'msg-x', payloadHash: 'a'.repeat(64) };
+    await ctx.processWager.execute(ctx.command(wallet), { correlationId: 'c', source: 'sqs', inbox });
+
+    await expect(
+      ctx.processWager.execute(ctx.command(wallet), {
+        correlationId: 'c',
+        source: 'sqs',
+        inbox: { ...inbox, payloadHash: 'b'.repeat(64) },
+      }),
+    ).rejects.toBeInstanceOf(InboxMessageConflictError);
     expect(ctx.uow.store.ledgerFor(wallet.id)).toHaveLength(2);
   });
 

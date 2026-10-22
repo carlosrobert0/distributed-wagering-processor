@@ -299,16 +299,16 @@ describe('API HTTP', () => {
       expect(ready.body).toEqual({ status: 'ok', checks: { postgres: 'up', sqs: 'up' } });
     });
 
-    test('/metrics expõe as métricas obrigatórias', async () => {
+    test('/metrics expõe amostras das métricas obrigatórias', async () => {
+      const wallet = await ctx.api.createWallet('100.00');
+      const bet = wager(wallet);
+      await ctx.api.submit(bet);
+      await ctx.api.submit(bet);
       const text = await fetch(`${ctx.api.baseUrl}/metrics`).then((r) => r.text());
-      for (const metric of [
-        'wagering_transactions_total',
-        'wagering_duplicates_total',
-        'wagering_processing_duration_seconds',
-        'wagering_wallet_lock_wait_seconds',
-      ]) {
-        expect(text).toContain(metric);
-      }
+      expect(text).toMatch(/wagering_transactions_total\{[^}]*status="PROCESSED"[^}]*\} [1-9]/);
+      expect(text).toMatch(/wagering_duplicates_total\{[^}]*type="idempotent_replay"[^}]*\} [1-9]/);
+      expect(text).toMatch(/wagering_processing_duration_seconds_count\{[^}]*source="http"[^}]*\} [1-9]/);
+      expect(text).toMatch(/wagering_wallet_lock_wait_seconds_count(\{[^}]*\})? [1-9]/);
     });
   });
 });
