@@ -157,17 +157,18 @@ export class WagerTransactionsConsumer {
   }
 
   private async process(entry: InFlightMessage): Promise<MessageDisposition> {
-    const decision = await this.handler.handle(entry.message.Body);
-    this.finalize(entry);
+    const decision = await this.handler.handle(entry.message.Body).finally(() => this.finalize(entry));
     switch (decision.action) {
       case 'ack':
         if (decision.committed) {
           this.injectCrashAfterCommit();
         }
         await this.ack(entry);
+        await this.clearAttempts(decision.context);
         return 'acked';
       case 'dead-letter':
         await this.deadLetter(entry, decision.reason, decision.context, 'permanent');
+        await this.clearAttempts(decision.context);
         return 'dead-lettered';
       case 'retry':
         return this.scheduleRetry(entry, decision.reason, decision.context);
@@ -182,6 +183,7 @@ export class WagerTransactionsConsumer {
     const attempt = await this.countAttempt(context, reason);
     if (attempt !== undefined && attempt >= this.options.maxAttempts) {
       await this.deadLetter(entry, `MAX_ATTEMPTS_EXCEEDED after ${attempt}: ${reason}`, context, 'max_attempts');
+      await this.clearAttempts(context);
       return 'dead-lettered';
     }
     const delay = this.retryDelaySeconds(attempt ?? receiveCountOf(entry.message));
@@ -232,6 +234,15 @@ export class WagerTransactionsConsumer {
     }
   }
 
+  private async clearAttempts(context: MessageContext): Promise<void> {
+    if (!context.messageId) {
+      return;
+    }
+    await this.attempts.clear(this.options.consumerName, context.messageId).catch((error: unknown) => {
+      this.logger.warn('could not clear delivery attempts', { ...context }, error);
+    });
+  }
+
   private finalize(entry: InFlightMessage): void {
     this.inFlight.delete(handleOf(entry.message));
   }
@@ -249,9 +260,6 @@ export class WagerTransactionsConsumer {
   private startVisibilityHeartbeat(): ReturnType<typeof setInterval> {
     const extendEveryMs = Math.max(1_000, (this.options.visibilityTimeoutSeconds * 1_000) / 2);
     return setInterval(() => {
-      if (!this.running) {
-        return;
-      }
       for (const entry of this.inFlight.values()) {
         void this.changeVisibility(entry, this.options.visibilityTimeoutSeconds);
       }

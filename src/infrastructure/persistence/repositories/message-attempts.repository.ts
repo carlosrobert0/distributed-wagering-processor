@@ -26,4 +26,13 @@ export class MikroOrmDeliveryAttempts implements DeliveryAttempts {
       ]);
     return Number(row?.attempts ?? 1);
   }
+
+  async clear(consumerName: string, messageId: string): Promise<void> {
+    await this.orm.em
+      .fork()
+      .execute(`DELETE FROM consumer_message_attempts WHERE consumer_name = ? AND message_id = ?`, [
+        consumerName,
+        messageId,
+      ]);
+  }
 }

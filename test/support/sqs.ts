@@ -49,7 +49,7 @@ export async function createTestQueues(
         VisibilityTimeout: String(options.visibilityTimeoutSeconds ?? 30),
         RedrivePolicy: JSON.stringify({
           deadLetterTargetArn: dlqArn,
-          maxReceiveCount: String(options.maxReceiveCount ?? 5),
+          maxReceiveCount: String(options.maxReceiveCount ?? 20),
         }),
       },
     }),

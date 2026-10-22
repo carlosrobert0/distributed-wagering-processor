@@ -37,7 +37,6 @@ export async function prepareTestDatabase(): Promise<string> {
 }
 
 async function createTemplateDatabase(): Promise<void> {
-  await dropStaleTestDatabases();
   await recreateDatabase(TEMPLATE_DATABASE);
   const orm = await createOrm({ url: withDatabase(POSTGRES_ADMIN_URL, TEMPLATE_DATABASE), poolMax: 2 });
   try {
@@ -47,16 +46,14 @@ async function createTemplateDatabase(): Promise<void> {
   }
 }
 
-async function dropStaleTestDatabases(): Promise<void> {
+export async function dropRunDatabases(): Promise<void> {
   await withAdmin(async (admin) => {
     const { rows } = await admin.query<{ datname: string }>(
-      `SELECT d.datname FROM pg_database d
-        WHERE starts_with(d.datname, $1)
-          AND NOT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname)`,
-      [TEST_DATABASE_PREFIX],
+      `SELECT datname FROM pg_database WHERE starts_with(datname, $1) AND datname <> $2`,
+      [`${TEST_DATABASE_PREFIX}${RUN_ID}_`, TEMPLATE_DATABASE],
     );
     for (const { datname } of rows) {
-      await admin.query(`DROP DATABASE IF EXISTS "${datname}"`).catch(() => undefined);
+      await admin.query(`DROP DATABASE IF EXISTS "${datname}" WITH (FORCE)`);
     }
   });
 }

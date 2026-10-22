@@ -70,10 +70,10 @@ export class MikroOrmOutboxRepository implements OutboxRepository {
     return records.map((record) => OutboxMessageMapper.toDomain(record));
   }
 
-  async save(message: OutboxMessage): Promise<void> {
+  async save(message: OutboxMessage, heldLease?: Date): Promise<void> {
     await this.em.nativeUpdate(
       OutboxMessageRecord,
-      { id: message.id, publishedAt: null },
+      { id: message.id, publishedAt: null, ...(heldLease ? { nextAttemptAt: heldLease } : {}) },
       {
         attempts: message.attempts,
         nextAttemptAt: message.nextAttemptAt ?? null,

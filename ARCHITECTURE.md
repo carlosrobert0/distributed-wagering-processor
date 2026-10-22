@@ -315,7 +315,8 @@ inbox (e a idempotency key) → só faz ack. Testado com um processo real morto 
   1. transação curta: `SELECT … WHERE published_at IS NULL AND next_attempt_at <= now() ORDER BY occurred_at
      FOR UPDATE SKIP LOCKED LIMIT N` e **lease** (`next_attempt_at = now + 60s`) → commit;
   2. publica no SQS **fora de transação** (cliente com timeout de conexão/requisição);
-  3. grava `published_at` (ou o retry) com `UPDATE … WHERE published_at IS NULL`.
+  3. grava `published_at` com `UPDATE … WHERE published_at IS NULL`; retry e devolução do lote só são
+     gravados se a instância ainda detém o lease (`AND next_attempt_at = lease`).
   Nenhum lock de banco fica preso durante a chamada de rede; publishers concorrentes pegam lotes disjuntos.
 - **At-least-once:** se o processo morre depois de publicar e antes do passo 3, o lease expira e outra
   instância republica com o **mesmo `eventId`**. Deduplicação: `MessageDeduplicationId = eventId` na
@@ -325,8 +326,8 @@ inbox (e a idempotency key) → só faz ack. Testado com um processo real morto 
   `wagering_outbox_lag_seconds`.
 - **Destino (INT-09):** `wagering-events.fifo`, `MessageGroupId = walletId`.
 - **Ordem (INT-15):** dentro de um lote, em ordem de `occurred_at`; no primeiro erro, o evento que falhou
-  e todo o resto do lote recebem o **mesmo** `next_attempt_at`, então eventos mais novos de uma wallet não
-  passam à frente do que falhou. Entre relays concorrentes a ordem por wallet é melhor esforço;
+  e todo o resto do lote recebem o **mesmo** `next_attempt_at`, então nenhum evento **do lote** passa à
+  frente do que falhou (eventos enfileirados depois da falha ainda podem passar). Entre relays concorrentes a ordem por wallet é melhor esforço;
   `WalletBalanceChanged` traz `walletVersion` para o consumidor ordenar/descartar.
 
 **Eventos:** `WagerTransactionProcessed` (inclusive LOSS e OPENING), `WagerTransactionRejected`,
@@ -436,7 +437,8 @@ Ligar a autenticação = registrar outra implementação da porta, sem tocar em 
   at-least-once com o mesmo `eventId`, e a gravação só acontece se o evento ainda não foi publicado.
 - **Head-of-line entre grupos:** o consumer só busca o próximo lote quando o atual termina; um grupo lento
   atrasa os demais da mesma instância (outras instâncias seguem consumindo).
-- **Crescimento de `outbox_messages` e `inbox_messages`:** não há job de retenção. Em produção:
+- **Crescimento de `outbox_messages` e `inbox_messages`:** não há job de retenção (já
+  `consumer_message_attempts` é limpa no ack/DLQ, então um redrive manual recomeça a contagem). Em produção:
   particionar por data ou expurgar publicados/processados após N dias (a inbox precisa reter pelo
   menos a janela de redelivery possível).
 - **`FAILED` não publica evento** (INT-12); fica auditável no banco e no log de erro.

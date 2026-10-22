@@ -316,8 +316,10 @@ class InMemoryOutboxRepository implements OutboxRepository {
       .map(cloneOutbox);
   }
 
-  async save(message: OutboxMessage): Promise<void> {
-    if (this.store.outbox.get(message.id)?.isPending() !== true) {
+  async save(message: OutboxMessage, heldLease?: Date): Promise<void> {
+    const stored = this.store.outbox.get(message.id);
+    const leaseLost = heldLease !== undefined && stored?.nextAttemptAt?.getTime() !== heldLease.getTime();
+    if (stored?.isPending() !== true || leaseLost) {
       return;
     }
     this.store.outbox.set(message.id, cloneOutbox(message));

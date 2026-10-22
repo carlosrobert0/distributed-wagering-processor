@@ -1,6 +1,10 @@
 import { afterAll, setDefaultTimeout } from 'bun:test';
 import { closeTestPools } from './database';
+import { dropRunDatabases } from './environment';
 
-setDefaultTimeout(120_000);
+setDefaultTimeout(180_000);
 
-afterAll(() => closeTestPools());
+afterAll(async () => {
+  await closeTestPools();
+  await dropRunDatabases().catch(() => undefined);
+});

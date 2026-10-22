@@ -28,16 +28,16 @@ export class PublishOutboxUseCase {
     for (const [index, message] of leased.entries()) {
       const remaining = leased.slice(index + 1);
       if (!this.leaseStillValid(leaseUntil)) {
-        await this.releaseAll([message, ...remaining], this.clock.now());
+        await this.releaseAll([message, ...remaining], this.clock.now(), leaseUntil);
         break;
       }
       const published = await this.publish(message);
-      if (!(await this.save(message))) {
+      if (!(await this.save(message, published ? undefined : leaseUntil))) {
         break;
       }
       if (!published) {
         result.failed += 1;
-        await this.releaseAll(remaining, message.nextAttemptAt ?? this.clock.now());
+        await this.releaseAll(remaining, message.nextAttemptAt ?? this.clock.now(), leaseUntil);
         break;
       }
       result.published += 1;
@@ -95,13 +95,13 @@ export class PublishOutboxUseCase {
     }
   }
 
-  private async releaseAll(messages: OutboxMessage[], dueAt: Date): Promise<void> {
+  private async releaseAll(messages: OutboxMessage[], dueAt: Date, heldLease: Date): Promise<void> {
     if (messages.length === 0) return;
     messages.forEach((message) => message.release(dueAt));
     try {
       await this.uow.run(async (scope) => {
         for (const message of messages) {
-          await scope.outbox.save(message);
+          await scope.outbox.save(message, heldLease);
         }
       });
     } catch (error) {
@@ -109,9 +109,9 @@ export class PublishOutboxUseCase {
     }
   }
 
-  private async save(message: OutboxMessage): Promise<boolean> {
+  private async save(message: OutboxMessage, heldLease?: Date): Promise<boolean> {
     try {
-      await this.uow.run((scope) => scope.outbox.save(message));
+      await this.uow.run((scope) => scope.outbox.save(message, heldLease));
       return true;
     } catch (error) {
       this.logger.error(

@@ -57,6 +57,6 @@ export interface OutboxStats {
 export interface OutboxRepository {
   enqueue(messages: readonly OutboxMessage[]): Promise<void>;
   claimDue(now: Date, limit: number): Promise<OutboxMessage[]>;
-  save(message: OutboxMessage): Promise<void>;
+  save(message: OutboxMessage, heldLease?: Date): Promise<void>;
   stats(): Promise<OutboxStats>;
 }

@@ -10,6 +10,7 @@ export interface IdGenerator {
 
 export interface DeliveryAttempts {
   recordFailure(consumerName: string, messageId: string, reason: string, at: Date): Promise<number>;
+  clear(consumerName: string, messageId: string): Promise<void>;
 }
 
 export interface EventPublisher {
