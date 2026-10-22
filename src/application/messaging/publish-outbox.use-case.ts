@@ -9,6 +9,7 @@ export interface OutboxRelayResult {
 }
 
 export const OUTBOX_LEASE_MS = 60_000;
+export const OUTBOX_LEASE_SAFETY_MARGIN_MS = 10_000;
 
 export class PublishOutboxUseCase {
   constructor(
@@ -20,15 +21,23 @@ export class PublishOutboxUseCase {
   ) {}
 
   async publishBatch(batchSize: number): Promise<OutboxRelayResult> {
-    const leased = await this.claimAndLease(batchSize);
+    const leaseUntil = new Date(this.clock.now().getTime() + OUTBOX_LEASE_MS);
+    const leased = await this.claimAndLease(batchSize, leaseUntil);
     const result: OutboxRelayResult = { claimed: leased.length, published: 0, failed: 0 };
 
     for (const [index, message] of leased.entries()) {
+      const remaining = leased.slice(index + 1);
+      if (!this.leaseStillValid(leaseUntil)) {
+        await this.releaseAll([message, ...remaining], this.clock.now());
+        break;
+      }
       const published = await this.publish(message);
-      await this.save(message);
+      if (!(await this.save(message))) {
+        break;
+      }
       if (!published) {
         result.failed += 1;
-        await this.releaseAll(leased.slice(index + 1));
+        await this.releaseAll(remaining, message.nextAttemptAt ?? this.clock.now());
         break;
       }
       result.published += 1;
@@ -48,16 +57,19 @@ export class PublishOutboxUseCase {
     this.metrics.setOutboxBacklog(stats.pending, lagSeconds);
   }
 
-  private claimAndLease(batchSize: number): Promise<OutboxMessage[]> {
+  private claimAndLease(batchSize: number, leaseUntil: Date): Promise<OutboxMessage[]> {
     return this.uow.run(async (scope) => {
-      const now = this.clock.now();
-      const messages = await scope.outbox.claimDue(now, batchSize);
+      const messages = await scope.outbox.claimDue(this.clock.now(), batchSize);
       for (const message of messages) {
-        message.lease(new Date(now.getTime() + OUTBOX_LEASE_MS));
+        message.lease(leaseUntil);
         await scope.outbox.save(message);
       }
       return messages;
     });
+  }
+
+  private leaseStillValid(leaseUntil: Date): boolean {
+    return this.clock.now().getTime() < leaseUntil.getTime() - OUTBOX_LEASE_SAFETY_MARGIN_MS;
   }
 
   private async publish(message: OutboxMessage): Promise<boolean> {
@@ -83,18 +95,31 @@ export class PublishOutboxUseCase {
     }
   }
 
-  private async releaseAll(messages: OutboxMessage[]): Promise<void> {
+  private async releaseAll(messages: OutboxMessage[], dueAt: Date): Promise<void> {
     if (messages.length === 0) return;
-    const now = this.clock.now();
-    messages.forEach((message) => message.release(now));
-    await this.uow.run(async (scope) => {
-      for (const message of messages) {
-        await scope.outbox.save(message);
-      }
-    });
+    messages.forEach((message) => message.release(dueAt));
+    try {
+      await this.uow.run(async (scope) => {
+        for (const message of messages) {
+          await scope.outbox.save(message);
+        }
+      });
+    } catch (error) {
+      this.logger.warn('could not release outbox lease; it will expire on its own', { count: messages.length }, error);
+    }
   }
 
-  private save(message: OutboxMessage): Promise<void> {
-    return this.uow.run((scope) => scope.outbox.save(message));
+  private async save(message: OutboxMessage): Promise<boolean> {
+    try {
+      await this.uow.run((scope) => scope.outbox.save(message));
+      return true;
+    } catch (error) {
+      this.logger.error(
+        'could not record outbox publication; the lease will expire and the event may be republished',
+        { eventId: message.id, walletId: message.partitionKey },
+        error,
+      );
+      return false;
+    }
   }
 }

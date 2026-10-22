@@ -21,6 +21,7 @@ enum SqlState {
   ConnectionFailure = '08006',
   UnableToEstablishConnection = '08001',
   ConnectionRejected = '08004',
+  RestrictViolation = '23001',
 }
 
 const TRANSIENT_SQL_STATES: Readonly<Record<string, TransientReason>> = {
@@ -95,8 +96,12 @@ export function toTransientError(error: unknown): TransientInfrastructureError |
 }
 
 export function toIntegrityError(error: unknown): IntegrityViolationError | undefined {
-  if (error instanceof ConstraintViolationException && !(error instanceof UniqueConstraintViolationException)) {
-    return new IntegrityViolationError(`Database integrity check rejected the operation: ${error.message}`, {
+  const guardTriggered = (error as { code?: unknown } | undefined)?.code === SqlState.RestrictViolation;
+  const constraintViolated =
+    error instanceof ConstraintViolationException && !(error instanceof UniqueConstraintViolationException);
+  if (guardTriggered || constraintViolated) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return new IntegrityViolationError(`Database integrity check rejected the operation: ${detail}`, {
       cause: error,
     });
   }

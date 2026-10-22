@@ -26,7 +26,7 @@ export interface WagerTransactionRepository {
   hasProcessedReversal(referenceTransactionId: string): Promise<boolean>;
   wakeDependents(providerId: string, externalTransactionId: string, now: Date): Promise<number>;
   claimDuePendingReferences(now: Date, limit: number, leaseUntil: Date): Promise<PendingReferenceCandidate[]>;
-  lockPendingReference(id: string): Promise<WagerTransaction | null>;
+  lockPendingReference(id: string, leaseUntil: Date): Promise<WagerTransaction | null>;
 }
 
 export interface LedgerSummary {

@@ -27,7 +27,9 @@ function outboxRelayWorker(useCase: PublishOutboxUseCase, settings: PollingSetti
           const result = await useCase.publishBatch(settings.batchSize);
           return result.claimed === settings.batchSize && result.failed === 0;
         } finally {
-          await useCase.refreshBacklogMetrics();
+          await useCase.refreshBacklogMetrics().catch((error: unknown) => {
+            logger.warn('could not refresh outbox backlog metrics', {}, error);
+          });
         }
       },
     },

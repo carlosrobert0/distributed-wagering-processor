@@ -1,6 +1,7 @@
 import { Migrator } from '@mikro-orm/migrations';
 import { defineConfig, MikroORM } from '@mikro-orm/postgresql';
 import { Migration20261021000000_initial_schema } from './migrations/Migration20261021000000_initial_schema';
+import { Migration20261022000000_consumer_message_attempts } from './migrations/Migration20261022000000_consumer_message_attempts';
 import { ENTITY_SCHEMAS } from './records';
 
 export interface OrmOptions {
@@ -21,6 +22,10 @@ export function createOrmConfig(options: OrmOptions) {
       allOrNothing: true,
       migrationsList: [
         { name: 'Migration20261021000000_initial_schema', class: Migration20261021000000_initial_schema },
+        {
+          name: 'Migration20261022000000_consumer_message_attempts',
+          class: Migration20261022000000_consumer_message_attempts,
+        },
       ],
     },
     ensureDatabase: false,

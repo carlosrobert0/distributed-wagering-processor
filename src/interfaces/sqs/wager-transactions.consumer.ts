@@ -5,12 +5,13 @@ import {
   ReceiveMessageCommand,
   SendMessageCommand,
 } from '@aws-sdk/client-sqs';
-import { AppLogger, LogFields, Metrics } from '../../application/ports/system';
+import { AppLogger, Clock, DeliveryAttempts, LogFields, Metrics } from '../../application/ports/system';
 import { ExponentialBackoff } from '../../domain/shared/exponential-backoff';
 import { SQS_REQUEST_TIMEOUT_MS, SqsQueues } from '../../infrastructure/messaging/sqs';
 import { MessageContext, WagerMessageHandler } from './wager-message.handler';
 
 export interface WagerConsumerOptions {
+  consumerName: string;
   queueName: string;
   dlqName: string;
   waitTimeSeconds: number;
@@ -45,6 +46,8 @@ export class WagerTransactionsConsumer {
     private readonly handler: WagerMessageHandler,
     private readonly queues: SqsQueues,
     private readonly options: WagerConsumerOptions,
+    private readonly attempts: DeliveryAttempts,
+    private readonly clock: Clock,
     private readonly metrics: Metrics,
     private readonly logger: AppLogger,
   ) {
@@ -143,10 +146,11 @@ export class WagerTransactionsConsumer {
         this.logger.error('sqs message handling failed', { sqsMessageId: entry.message.MessageId }, error);
         return 'retry-scheduled' as const;
       });
-      this.inFlight.delete(handleOf(entry.message));
       if (disposition === 'retry-scheduled') {
-        const delay = this.retryDelaySeconds(entry.message);
-        await Promise.all(group.slice(index + 1).map((rest) => this.changeVisibility(rest, delay)));
+        const rest = group.slice(index + 1);
+        rest.forEach((sibling) => this.finalize(sibling));
+        const delay = this.retryDelaySeconds(receiveCountOf(entry.message));
+        await Promise.all(rest.map((sibling) => this.changeVisibility(sibling, delay)));
         return;
       }
     }
@@ -154,6 +158,7 @@ export class WagerTransactionsConsumer {
 
   private async process(entry: InFlightMessage): Promise<MessageDisposition> {
     const decision = await this.handler.handle(entry.message.Body);
+    this.finalize(entry);
     switch (decision.action) {
       case 'ack':
         if (decision.committed) {
@@ -174,12 +179,12 @@ export class WagerTransactionsConsumer {
     reason: string,
     context: MessageContext,
   ): Promise<MessageDisposition> {
-    const attempt = receiveCountOf(entry.message);
-    if (attempt >= this.options.maxAttempts) {
+    const attempt = await this.countAttempt(context, reason);
+    if (attempt !== undefined && attempt >= this.options.maxAttempts) {
       await this.deadLetter(entry, `MAX_ATTEMPTS_EXCEEDED after ${attempt}: ${reason}`, context, 'max_attempts');
       return 'dead-lettered';
     }
-    const delay = this.retryDelaySeconds(entry.message);
+    const delay = this.retryDelaySeconds(attempt ?? receiveCountOf(entry.message));
     this.metrics.retry('sqs_consumer');
     this.logger.warn('sqs message retry scheduled', {
       ...logFields(entry, context),
@@ -215,6 +220,22 @@ export class WagerTransactionsConsumer {
     this.logger.error('sqs message moved to DLQ', { ...logFields(entry, context), reason: truncatedReason });
   }
 
+  private async countAttempt(context: MessageContext, reason: string): Promise<number | undefined> {
+    if (!context.messageId) {
+      return undefined;
+    }
+    try {
+      return await this.attempts.recordFailure(this.options.consumerName, context.messageId, reason, this.clock.now());
+    } catch (error) {
+      this.logger.warn('could not record delivery attempt; relying on the redrive policy', { ...context }, error);
+      return undefined;
+    }
+  }
+
+  private finalize(entry: InFlightMessage): void {
+    this.inFlight.delete(handleOf(entry.message));
+  }
+
   private async ack(entry: InFlightMessage): Promise<void> {
     try {
       await this.queues.client.send(
@@ -228,6 +249,9 @@ export class WagerTransactionsConsumer {
   private startVisibilityHeartbeat(): ReturnType<typeof setInterval> {
     const extendEveryMs = Math.max(1_000, (this.options.visibilityTimeoutSeconds * 1_000) / 2);
     return setInterval(() => {
+      if (!this.running) {
+        return;
+      }
       for (const entry of this.inFlight.values()) {
         void this.changeVisibility(entry, this.options.visibilityTimeoutSeconds);
       }
@@ -249,11 +273,12 @@ export class WagerTransactionsConsumer {
   }
 
   private async releaseAll(entries: InFlightMessage[]): Promise<void> {
+    entries.forEach((entry) => this.finalize(entry));
     await Promise.all(entries.map((entry) => this.changeVisibility(entry, 0)));
   }
 
-  private retryDelaySeconds(message: Message): number {
-    return Math.min(MAX_VISIBILITY_TIMEOUT_SECONDS, Math.round(this.retryBackoff.delayFor(receiveCountOf(message))));
+  private retryDelaySeconds(attempt: number): number {
+    return Math.min(MAX_VISIBILITY_TIMEOUT_SECONDS, Math.round(this.retryBackoff.delayFor(attempt)));
   }
 
   private injectCrashAfterCommit(): void {

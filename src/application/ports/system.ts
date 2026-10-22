@@ -8,6 +8,10 @@ export interface IdGenerator {
   next(): string;
 }
 
+export interface DeliveryAttempts {
+  recordFailure(consumerName: string, messageId: string, reason: string, at: Date): Promise<number>;
+}
+
 export interface EventPublisher {
   publish(message: OutboxMessage): Promise<void>;
 }
@@ -44,6 +48,7 @@ export interface Metrics {
 }
 
 export const CLOCK = Symbol('Clock');
+export const DELIVERY_ATTEMPTS = Symbol('DeliveryAttempts');
 export const ID_GENERATOR = Symbol('IdGenerator');
 export const EVENT_PUBLISHER = Symbol('EventPublisher');
 export const APP_LOGGER = Symbol('AppLogger');

@@ -66,11 +66,25 @@ export class ProcessWagerTransactionUseCase {
     draft: WagerTransaction,
     ctx: ProcessingContext,
   ): Promise<WagerTransactionResult | undefined> {
-    const { duplicateDelivery, existing } = await this.uow.run(async (scope) => ({
-      duplicateDelivery: ctx.inbox ? await this.isDuplicateDelivery(scope, ctx.inbox) : false,
-      existing: await this.findExisting(scope, draft),
-    }));
-    return existing ? this.replay(existing, draft, duplicateDelivery) : undefined;
+    return this.uow.run(async (scope) => {
+      const duplicateDelivery = ctx.inbox ? await this.isDuplicateDelivery(scope, ctx.inbox) : false;
+      const existing = await this.findExisting(scope, draft);
+      if (!existing) {
+        return undefined;
+      }
+      const result = this.replay(existing, draft, duplicateDelivery);
+      if (ctx.inbox && !duplicateDelivery) {
+        await this.recordReplayedDelivery(scope, ctx.inbox);
+      }
+      return result;
+    });
+  }
+
+  private async recordReplayedDelivery(scope: TransactionScope, receipt: InboxReceipt): Promise<void> {
+    const now = this.clock.now();
+    const message = InboxMessage.receive({ ...receipt, receivedAt: now });
+    message.markProcessed(now);
+    await scope.inbox.tryReceive(message);
   }
 
   private async processResolvingRaces(
@@ -139,8 +153,7 @@ export class ProcessWagerTransactionUseCase {
     if (await scope.inbox.tryReceive(message)) {
       return { message, duplicateDelivery: false };
     }
-    await this.isDuplicateDelivery(scope, receipt);
-    return { message, duplicateDelivery: true };
+    return { message, duplicateDelivery: await this.isDuplicateDelivery(scope, receipt) };
   }
 
   private async isDuplicateDelivery(scope: TransactionScope, receipt: InboxReceipt): Promise<boolean> {

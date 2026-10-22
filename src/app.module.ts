@@ -8,6 +8,8 @@ import {
   AppLogger,
   CLOCK,
   Clock,
+  DELIVERY_ATTEMPTS,
+  DeliveryAttempts,
   EVENT_PUBLISHER,
   EventPublisher,
   ID_GENERATOR,
@@ -32,6 +34,7 @@ import { PrometheusMetrics } from './infrastructure/observability/prometheus-met
 import { ReadinessProbe } from './infrastructure/observability/readiness-probe';
 import { createOrm } from './infrastructure/persistence/mikro-orm.config';
 import { MikroOrmUnitOfWork } from './infrastructure/persistence/mikro-orm-unit-of-work';
+import { MikroOrmDeliveryAttempts } from './infrastructure/persistence/repositories/message-attempts.repository';
 import { SystemClock, UuidV7Generator } from './infrastructure/system/system-adapters';
 import {
   AllowAllProviderAuthenticator,
@@ -168,12 +171,25 @@ export class AppModule {
         inject: [ProcessWagerTransactionUseCase, APP_LOGGER],
       },
       {
+        provide: DELIVERY_ATTEMPTS,
+        useFactory: (orm: MikroORM) => new MikroOrmDeliveryAttempts(orm),
+        inject: [MikroORM],
+      },
+      {
         provide: WagerTransactionsConsumer,
-        useFactory: (handler: WagerMessageHandler, queues: SqsQueues, metrics: Metrics, logger: AppLogger) =>
+        useFactory: (
+          handler: WagerMessageHandler,
+          queues: SqsQueues,
+          attempts: DeliveryAttempts,
+          clock: Clock,
+          metrics: Metrics,
+          logger: AppLogger,
+        ) =>
           new WagerTransactionsConsumer(
             handler,
             queues,
             {
+              consumerName: config.consumer.name,
               queueName: config.queues.wagerTransactions,
               dlqName: config.queues.wagerTransactionsDlq,
               waitTimeSeconds: config.consumer.waitTimeSeconds,
@@ -185,10 +201,12 @@ export class AppModule {
               shutdownGraceMs: config.consumer.shutdownGraceMs,
               faultInjection: config.faultInjection,
             },
+            attempts,
+            clock,
             metrics,
             logger,
           ),
-        inject: [WagerMessageHandler, SqsQueues, METRICS, APP_LOGGER],
+        inject: [WagerMessageHandler, SqsQueues, DELIVERY_ATTEMPTS, CLOCK, METRICS, APP_LOGGER],
       },
       {
         provide: BackgroundWorkers,

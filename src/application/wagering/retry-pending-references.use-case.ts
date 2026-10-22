@@ -1,7 +1,7 @@
 import { FailureCode } from '../../domain/wagering/failure-code';
 import { SettlementOutcome } from '../../domain/wagering/wager-settlement';
 import { WagerTransactionStatus } from '../../domain/wagering/wager-transaction';
-import { DuplicateTransactionError, TransientInfrastructureError } from '../errors';
+import { TransientInfrastructureError } from '../errors';
 import { PendingReferenceCandidate } from '../ports/repositories';
 import { AppLogger, Clock, Metrics } from '../ports/system';
 import { UnitOfWork } from '../ports/unit-of-work';
@@ -15,6 +15,7 @@ export interface PendingReferenceRunResult {
 }
 
 export const PENDING_REFERENCE_LEASE_MS = 30_000;
+export const PENDING_REFERENCE_LEASE_SAFETY_MARGIN_MS = 5_000;
 
 type CandidateOutcome = 'settled' | 'still-pending' | 'skipped' | 'deferred' | 'failed';
 
@@ -28,17 +29,18 @@ export class RetryPendingReferencesUseCase {
   ) {}
 
   async runOnce(batchSize: number): Promise<PendingReferenceRunResult> {
+    const now = this.clock.now();
+    const leaseUntil = new Date(now.getTime() + PENDING_REFERENCE_LEASE_MS);
     const candidates = await this.uow.run((scope) =>
-      scope.transactions.claimDuePendingReferences(
-        this.clock.now(),
-        batchSize,
-        new Date(this.clock.now().getTime() + PENDING_REFERENCE_LEASE_MS),
-      ),
+      scope.transactions.claimDuePendingReferences(now, batchSize, leaseUntil),
     );
     const result: PendingReferenceRunResult = { candidates: candidates.length, settled: 0, stillPending: 0, failed: 0 };
 
     for (const candidate of candidates) {
-      const outcome = await this.retry(candidate);
+      if (!this.leaseStillValid(leaseUntil)) {
+        break;
+      }
+      const outcome = await this.retry(candidate, leaseUntil);
       if (outcome === 'settled') result.settled += 1;
       if (outcome === 'still-pending') result.stillPending += 1;
       if (outcome === 'failed') result.failed += 1;
@@ -46,9 +48,13 @@ export class RetryPendingReferencesUseCase {
     return result;
   }
 
-  private async retry(candidate: PendingReferenceCandidate): Promise<CandidateOutcome> {
+  private leaseStillValid(leaseUntil: Date): boolean {
+    return this.clock.now().getTime() < leaseUntil.getTime() - PENDING_REFERENCE_LEASE_SAFETY_MARGIN_MS;
+  }
+
+  private async retry(candidate: PendingReferenceCandidate, leaseUntil: Date): Promise<CandidateOutcome> {
     try {
-      const outcome = await this.settleCandidate(candidate);
+      const outcome = await this.settleCandidate(candidate, leaseUntil);
       if (!outcome) {
         return 'skipped';
       }
@@ -64,7 +70,7 @@ export class RetryPendingReferencesUseCase {
       });
       return 'settled';
     } catch (error) {
-      if (error instanceof TransientInfrastructureError || error instanceof DuplicateTransactionError) {
+      if (error instanceof TransientInfrastructureError) {
         this.metrics.retry('pending_reference');
         this.logger.warn('pending reference retry deferred', {
           transactionId: candidate.transactionId,
@@ -78,10 +84,13 @@ export class RetryPendingReferencesUseCase {
     }
   }
 
-  private settleCandidate(candidate: PendingReferenceCandidate): Promise<SettlementOutcome | undefined> {
+  private settleCandidate(
+    candidate: PendingReferenceCandidate,
+    leaseUntil: Date,
+  ): Promise<SettlementOutcome | undefined> {
     return this.uow.run(async (scope) => {
       const wallet = await scope.wallets.findByIdForUpdate(candidate.walletId);
-      const transaction = await scope.transactions.lockPendingReference(candidate.transactionId);
+      const transaction = await scope.transactions.lockPendingReference(candidate.transactionId, leaseUntil);
       if (!wallet || !transaction) {
         return undefined;
       }

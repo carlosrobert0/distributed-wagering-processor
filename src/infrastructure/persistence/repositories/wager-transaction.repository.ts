@@ -101,10 +101,10 @@ export class MikroOrmWagerTransactionRepository implements WagerTransactionRepos
     return rows.map((row) => ({ transactionId: row.id, walletId: row.wallet_id }));
   }
 
-  async lockPendingReference(id: string): Promise<WagerTransaction | null> {
+  async lockPendingReference(id: string, leaseUntil: Date): Promise<WagerTransaction | null> {
     const record = await this.em.findOne(
       WagerTransactionRecord,
-      { id, status: WagerTransactionStatus.PendingReference },
+      { id, status: WagerTransactionStatus.PendingReference, nextReferenceCheckAt: leaseUntil },
       { ...FRESH, lockMode: LockMode.PESSIMISTIC_PARTIAL_WRITE },
     );
     return this.toDomain(record);
