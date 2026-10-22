@@ -86,10 +86,18 @@ export class OutboxMessage {
     return this.isPending() && (this._nextAttemptAt === undefined || this._nextAttemptAt.getTime() <= now.getTime());
   }
 
+  lease(until: Date): void {
+    this.assertPending('LEASE');
+    this._nextAttemptAt = until;
+  }
+
+  release(now: Date): void {
+    this.assertPending('RELEASE');
+    this._nextAttemptAt = now;
+  }
+
   markPublished(at: Date): void {
-    if (!this.isPending()) {
-      throw new InvalidTransactionStateError(this.id, 'PUBLISHED', 'PUBLISHED');
-    }
+    this.assertPending('PUBLISHED');
     this._attempts += 1;
     this._publishedAt = at;
     this._nextAttemptAt = undefined;
@@ -97,11 +105,15 @@ export class OutboxMessage {
   }
 
   scheduleRetry(now: Date, reason?: string): void {
-    if (!this.isPending()) {
-      throw new InvalidTransactionStateError(this.id, 'PUBLISHED', 'RETRY');
-    }
+    this.assertPending('RETRY');
     this._attempts += 1;
     this._nextAttemptAt = OUTBOX_RETRY_POLICY.nextAttemptAt(now, this._attempts);
     this._lastError = reason?.slice(0, MAX_ERROR_LENGTH);
+  }
+
+  private assertPending(attempted: string): void {
+    if (!this.isPending()) {
+      throw new InvalidTransactionStateError(this.id, 'PUBLISHED', attempted);
+    }
   }
 }

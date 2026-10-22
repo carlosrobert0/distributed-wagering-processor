@@ -38,6 +38,10 @@ export class InboxMessage {
     return this._processedAt;
   }
 
+  matchesPayload(payloadHash: string): boolean {
+    return this.payloadHash === payloadHash;
+  }
+
   isProcessed(): boolean {
     return this._processedAt !== undefined;
   }

@@ -57,6 +57,7 @@ export class Migration20261021000000_initial_schema extends Migration {
         status                             varchar(24)   NOT NULL,
         failure_code                       varchar(64),
         balance_after                      numeric(20,2),
+        balance_currency                   char(3),
         reference_attempts                 integer       NOT NULL DEFAULT 0,
         next_reference_check_at            timestamptz,
         created_at                         timestamptz   NOT NULL,
@@ -80,8 +81,12 @@ export class Migration20261021000000_initial_schema extends Migration {
           CHECK ((status IN ('REJECTED','FAILED')) = (failure_code IS NOT NULL)),
         CONSTRAINT wager_tx_terminal_timestamp_ck
           CHECK ((status IN ('PROCESSED','REJECTED','FAILED')) = (processed_at IS NOT NULL)),
-        CONSTRAINT wager_tx_observed_balance_ck
-          CHECK ((status IN ('PROCESSED','REJECTED')) = (balance_after IS NOT NULL)),
+        CONSTRAINT wager_tx_processed_balance_ck
+          CHECK (status <> 'PROCESSED' OR balance_after IS NOT NULL),
+        CONSTRAINT wager_tx_unsettled_balance_ck
+          CHECK (status NOT IN ('PENDING','PENDING_REFERENCE') OR balance_after IS NULL),
+        CONSTRAINT wager_tx_balance_currency_ck
+          CHECK ((balance_after IS NULL) = (balance_currency IS NULL)),
         CONSTRAINT wager_tx_observed_balance_non_negative_ck CHECK (balance_after >= 0),
         CONSTRAINT wager_tx_pending_schedule_ck
           CHECK ((status = 'PENDING_REFERENCE') = (next_reference_check_at IS NOT NULL)),

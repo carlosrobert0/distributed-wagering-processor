@@ -17,7 +17,7 @@ export class Money {
     private readonly cents: bigint,
     public readonly currency: string,
   ) {
-    if (cents > MAX_ABSOLUTE_CENTS || cents < -MAX_ABSOLUTE_CENTS) {
+    if (!Money.isWithinLimits(cents)) {
       throw new InvalidMoneyError('Amount exceeds the supported precision (18 integer digits)');
     }
     Object.freeze(this);
@@ -54,6 +54,11 @@ export class Money {
   subtract(other: Money): Money {
     this.assertSameCurrency(other);
     return new Money(this.cents - other.cents, this.currency);
+  }
+
+  canAdd(other: Money): boolean {
+    this.assertSameCurrency(other);
+    return Money.isWithinLimits(this.cents + other.cents);
   }
 
   negate(): Money {
@@ -105,6 +110,10 @@ export class Money {
     if (this.currency !== other.currency) {
       throw new CurrencyMismatchError(this.currency, other.currency);
     }
+  }
+
+  private static isWithinLimits(cents: bigint): boolean {
+    return cents <= MAX_ABSOLUTE_CENTS && cents >= -MAX_ABSOLUTE_CENTS;
   }
 
   private static parseCents(amount: string): bigint {

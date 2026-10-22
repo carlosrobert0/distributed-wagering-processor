@@ -70,7 +70,10 @@ export const WagerTransactionMapper = {
       referenceTransactionId: record.referenceTransactionId ?? undefined,
       failureCode: failureCode as FailureCode | undefined,
       processedAt: record.processedAt ?? undefined,
-      balanceAfter: record.balanceAfter != null ? money(record.balanceAfter, record.currency) : undefined,
+      balanceAfter:
+        record.balanceAfter != null && record.balanceCurrency != null
+          ? money(record.balanceAfter, record.balanceCurrency)
+          : undefined,
       referenceAttempts: record.referenceAttempts,
       nextReferenceCheckAt: record.nextReferenceCheckAt ?? undefined,
     });
@@ -82,6 +85,7 @@ export const WagerTransactionMapper = {
       referenceTransactionId: transaction.referenceTransactionId ?? null,
       failureCode: transaction.failureCode ?? null,
       balanceAfter: transaction.balanceAfter?.toJSON().amount ?? null,
+      balanceCurrency: transaction.balanceAfter?.currency ?? null,
       referenceAttempts: transaction.referenceAttempts,
       nextReferenceCheckAt: transaction.nextReferenceCheckAt ?? null,
       processedAt: transaction.processedAt ?? null,

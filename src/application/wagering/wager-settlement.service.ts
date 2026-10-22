@@ -13,7 +13,7 @@ import {
   settleWagerTransaction,
   SettlementOutcome,
 } from '../../domain/wagering/wager-settlement';
-import { WagerTransaction } from '../../domain/wagering/wager-transaction';
+import { WagerTransaction, WagerTransactionStatus } from '../../domain/wagering/wager-transaction';
 import { Wallet } from '../../domain/wallet/wallet';
 import { Clock, IdGenerator, Metrics, ProcessingSource } from '../ports/system';
 import { TransactionScope } from '../ports/unit-of-work';
@@ -37,10 +37,10 @@ export class WagerSettlementService {
     wallet: Wallet,
     transaction: WagerTransaction,
     ctx: SettlementContext,
-    persistence: 'insert' | 'update',
   ): Promise<SettlementOutcome> {
     const now = this.clock.now();
     const versionBefore = wallet.version;
+    const isNew = transaction.status === WagerTransactionStatus.Pending;
     const reference = transaction.hasReference() ? await this.lookupReference(scope, transaction) : undefined;
 
     const outcome = settleWagerTransaction({
@@ -52,7 +52,7 @@ export class WagerSettlementService {
       referenceRetryPolicy: this.referenceRetryPolicy,
     });
 
-    if (persistence === 'insert') {
+    if (isNew) {
       await scope.transactions.insert(transaction);
     } else {
       await scope.transactions.update(transaction);
@@ -88,9 +88,7 @@ export class WagerSettlementService {
     if (!reference) {
       return { found: false };
     }
-    const alreadyReversed = transaction.isReversal()
-      ? await scope.transactions.hasProcessedReversal(reference.id)
-      : false;
+    const alreadyReversed = await scope.transactions.hasProcessedReversal(reference.id);
     return { found: true, transaction: reference, alreadyReversed };
   }
 

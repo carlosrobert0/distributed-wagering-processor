@@ -26,95 +26,132 @@ export type SettlementOutcome =
 export const DEFAULT_REFERENCE_RETRY_POLICY = new ExponentialBackoff(2_000, 300_000, 8);
 
 export function settleWagerTransaction(input: SettlementInput): SettlementOutcome {
-  const { wallet, transaction, now } = input;
+  return new Settlement(input).run();
+}
 
-  if (transaction.walletId !== wallet.id) {
-    throw new InvariantViolationError('Settlement received a wallet that does not own the transaction');
-  }
-  if (transaction.isTerminal()) {
-    throw new InvariantViolationError(`Transaction ${transaction.id} is already ${transaction.status}`);
+class Settlement {
+  private readonly wallet: Wallet;
+  private readonly transaction: WagerTransaction;
+  private readonly now: Date;
+
+  constructor(private readonly input: SettlementInput) {
+    this.wallet = input.wallet;
+    this.transaction = input.transaction;
+    this.now = input.now;
+    this.assertSettleable();
   }
 
-  const reject = (code: FailureCode): SettlementOutcome => {
-    transaction.reject(code, { balanceAfter: wallet.balance, at: now });
+  run(): SettlementOutcome {
+    if (this.transaction.playerId !== this.wallet.playerId) {
+      return this.rejectWithoutExposingBalance(FailureCode.PlayerWalletMismatch);
+    }
+    if (!this.transaction.money.hasCurrency(this.wallet.currency)) {
+      return this.reject(FailureCode.CurrencyMismatch);
+    }
+    if (!this.transaction.hasReference()) {
+      return this.apply(undefined);
+    }
+
+    const lookup = this.requireLookup();
+    if (!lookup.found || isAwaitingSettlement(lookup.transaction)) {
+      return this.awaitReference();
+    }
+    const failure = validateReference(this.transaction, lookup.transaction, lookup.alreadyReversed);
+    if (failure) {
+      return this.reject(failure, lookup.transaction.id);
+    }
+    return this.apply(lookup.transaction);
+  }
+
+  private apply(reference: WagerTransaction | undefined): SettlementOutcome {
+    if (!this.transaction.affectsBalance()) {
+      this.markProcessed(reference);
+      return { type: 'processed', reference };
+    }
+
+    const direction = this.transaction.ledgerDirectionFor(reference);
+    const blocked = this.balanceRuleViolation(direction);
+    if (blocked) {
+      return this.reject(blocked, reference?.id);
+    }
+
+    const movement = {
+      transactionId: this.transaction.id,
+      ledgerEntryId: this.input.ledgerEntryId,
+      money: this.transaction.money,
+      at: this.now,
+    };
+    const ledgerEntry =
+      direction === LedgerDirection.Debit ? this.wallet.debit(movement) : this.wallet.credit(movement);
+    this.markProcessed(reference);
+    return { type: 'processed', ledgerEntry, reference };
+  }
+
+  private balanceRuleViolation(direction: LedgerDirection): FailureCode | undefined {
+    if (direction === LedgerDirection.Credit) {
+      return this.wallet.canCredit(this.transaction.money) ? undefined : FailureCode.BalanceLimitExceeded;
+    }
+    if (this.wallet.canDebit(this.transaction.money)) {
+      return undefined;
+    }
+    return this.transaction.requiresReference() ? FailureCode.ReversalWouldOverdraw : FailureCode.InsufficientFunds;
+  }
+
+  private awaitReference(): SettlementOutcome {
+    const policy = this.input.referenceRetryPolicy;
+    if (this.transaction.status === WagerTransactionStatus.Pending) {
+      this.transaction.markPendingReference(policy.nextAttemptAt(this.now, 1));
+      return { type: 'pending-reference', firstTime: true };
+    }
+
+    const attemptsMade = this.transaction.referenceAttempts + 1;
+    if (policy.isExhausted(attemptsMade)) {
+      this.transaction.expireReference({ balanceAfter: this.wallet.balance, at: this.now });
+      return { type: 'rejected', failureCode: FailureCode.ReferenceNotFound };
+    }
+    this.transaction.scheduleReferenceRetry(policy.nextAttemptAt(this.now, attemptsMade + 1));
+    return { type: 'pending-reference', firstTime: false };
+  }
+
+  private markProcessed(reference: WagerTransaction | undefined): void {
+    this.transaction.markProcessed({
+      referenceTransactionId: reference?.id,
+      balanceAfter: this.wallet.balance,
+      at: this.now,
+    });
+  }
+
+  private reject(code: FailureCode, referenceTransactionId?: string): SettlementOutcome {
+    this.transaction.reject(code, { balanceAfter: this.wallet.balance, at: this.now, referenceTransactionId });
     return { type: 'rejected', failureCode: code };
-  };
-
-  if (transaction.playerId !== wallet.playerId) {
-    return reject(FailureCode.PlayerWalletMismatch);
-  }
-  if (!transaction.money.hasCurrency(wallet.currency)) {
-    return reject(FailureCode.CurrencyMismatch);
   }
 
-  let reference: WagerTransaction | undefined;
-  if (transaction.hasReference()) {
-    const lookup = input.reference;
-    if (!lookup) {
+  private rejectWithoutExposingBalance(code: FailureCode): SettlementOutcome {
+    this.transaction.reject(code, { at: this.now });
+    return { type: 'rejected', failureCode: code };
+  }
+
+  private requireLookup(): ReferenceLookup {
+    if (!this.input.reference) {
       throw new InvariantViolationError('Reference lookup is required for transactions with a reference');
     }
-    if (!lookup.found || isAwaitingSettlement(lookup.transaction)) {
-      return awaitReference(transaction, input, reject);
-    }
-    const failure = validateReference(transaction, lookup.transaction, lookup.alreadyReversed);
-    if (failure) {
-      return reject(failure);
-    }
-    reference = lookup.transaction;
+    return this.input.reference;
   }
 
-  if (!transaction.affectsBalance()) {
-    transaction.markProcessed({ referenceTransactionId: reference?.id, balanceAfter: wallet.balance, at: now });
-    return { type: 'processed', reference };
-  }
-
-  const movement = {
-    transactionId: transaction.id,
-    ledgerEntryId: input.ledgerEntryId,
-    money: transaction.money,
-    at: now,
-  };
-  const direction = transaction.ledgerDirectionFor(reference);
-
-  let ledgerEntry: WalletLedgerEntry;
-  if (direction === LedgerDirection.Debit) {
-    if (!wallet.canDebit(transaction.money)) {
-      return reject(transaction.isReversal() ? FailureCode.ReversalWouldOverdraw : FailureCode.InsufficientFunds);
+  private assertSettleable(): void {
+    if (this.transaction.walletId !== this.wallet.id) {
+      throw new InvariantViolationError('Settlement received a wallet that does not own the transaction');
     }
-    ledgerEntry = wallet.debit(movement);
-  } else {
-    ledgerEntry = wallet.credit(movement);
+    if (this.transaction.isTerminal()) {
+      throw new InvariantViolationError(`Transaction ${this.transaction.id} is already ${this.transaction.status}`);
+    }
   }
-
-  transaction.markProcessed({ referenceTransactionId: reference?.id, balanceAfter: wallet.balance, at: now });
-  return { type: 'processed', ledgerEntry, reference };
 }
 
 function isAwaitingSettlement(reference: WagerTransaction): boolean {
   return (
     reference.status === WagerTransactionStatus.Pending || reference.status === WagerTransactionStatus.PendingReference
   );
-}
-
-function awaitReference(
-  transaction: WagerTransaction,
-  input: SettlementInput,
-  reject: (code: FailureCode) => SettlementOutcome,
-): SettlementOutcome {
-  const policy = input.referenceRetryPolicy;
-
-  if (transaction.status === WagerTransactionStatus.Pending) {
-    transaction.markPendingReference(policy.nextAttemptAt(input.now, 1));
-    return { type: 'pending-reference', firstTime: true };
-  }
-
-  const attemptsMade = transaction.referenceAttempts + 1;
-  if (policy.isExhausted(attemptsMade)) {
-    transaction.recordReferenceAttempt();
-    return reject(FailureCode.ReferenceNotFound);
-  }
-  transaction.scheduleReferenceRetry(policy.nextAttemptAt(input.now, attemptsMade + 1));
-  return { type: 'pending-reference', firstTime: false };
 }
 
 function validateReference(
@@ -137,13 +174,11 @@ function validateReference(
   if (!transaction.canReference(reference.kind)) {
     return FailureCode.InvalidReferenceKind;
   }
-  if (transaction.isReversal()) {
-    if (!reference.money.equals(transaction.money)) {
-      return FailureCode.AmountMismatch;
-    }
-    if (alreadyReversed) {
-      return FailureCode.AlreadyReversed;
-    }
+  if (!transaction.requiresReference()) {
+    return alreadyReversed ? FailureCode.ReferenceReversed : undefined;
   }
-  return undefined;
+  if (!reference.money.equals(transaction.money)) {
+    return FailureCode.AmountMismatch;
+  }
+  return alreadyReversed ? FailureCode.AlreadyReversed : undefined;
 }

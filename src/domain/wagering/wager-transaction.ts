@@ -220,7 +220,7 @@ export class WagerTransaction {
     );
   }
 
-  static kindRequiresReference(kind: WagerTransactionKind): boolean {
+  private static kindRequiresReference(kind: WagerTransactionKind): boolean {
     return kind === WagerTransactionKind.Refund || kind === WagerTransactionKind.Rollback;
   }
 
@@ -281,18 +281,20 @@ export class WagerTransaction {
     this._nextReferenceCheckAt = nextCheckAt;
   }
 
-  recordReferenceAttempt(): void {
+  expireReference(params: { balanceAfter: Money; at: Date }): void {
     if (this._status !== WagerTransactionStatus.PendingReference) {
-      throw new InvalidTransactionStateError(this.id, this._status, 'REFERENCE_ATTEMPT');
+      throw new InvalidTransactionStateError(this.id, this._status, WagerTransactionStatus.Rejected);
     }
     this._referenceAttempts += 1;
+    this.reject(FailureCode.ReferenceNotFound, params);
   }
 
-  reject(code: FailureCode, params: { balanceAfter: Money; at: Date }): void {
+  reject(code: FailureCode, params: { at: Date; balanceAfter?: Money; referenceTransactionId?: string }): void {
     this.assertNotTerminal(WagerTransactionStatus.Rejected);
     this._status = WagerTransactionStatus.Rejected;
     this._failureCode = code;
     this._balanceAfter = params.balanceAfter;
+    this._referenceTransactionId = params.referenceTransactionId;
     this._processedAt = params.at;
     this._nextReferenceCheckAt = undefined;
   }
@@ -319,10 +321,6 @@ export class WagerTransaction {
 
   hasReference(): boolean {
     return this.referenceExternalTransactionId !== undefined;
-  }
-
-  isReversal(): boolean {
-    return this.requiresReference();
   }
 
   canReference(kind: WagerTransactionKind): boolean {

@@ -110,6 +110,11 @@ export class Wallet {
     return !this._balance.isLessThan(money);
   }
 
+  canCredit(money: Money): boolean {
+    this.assertSameCurrency(money);
+    return this._balance.canAdd(money);
+  }
+
   debit(movement: BalanceMovement): WalletLedgerEntry {
     if (!this.canDebit(movement.money)) {
       throw new InsufficientFundsError(this.id);
