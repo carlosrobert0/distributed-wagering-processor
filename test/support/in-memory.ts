@@ -71,6 +71,16 @@ function cloneTransaction(tx: WagerTransaction, overrides: Partial<WagerTransact
   });
 }
 
+function cloneInbox(message: InboxMessage): InboxMessage {
+  return InboxMessage.rehydrate({
+    messageId: message.messageId,
+    consumerName: message.consumerName,
+    payloadHash: message.payloadHash,
+    receivedAt: message.receivedAt,
+    processedAt: message.processedAt,
+  });
+}
+
 function cloneOutbox(message: OutboxMessage): OutboxMessage {
   return OutboxMessage.rehydrate({
     id: message.id,
@@ -98,7 +108,7 @@ export class InMemoryStore {
     this.wallets.forEach((wallet, id) => copy.wallets.set(id, cloneWallet(wallet)));
     this.transactions.forEach((tx, id) => copy.transactions.set(id, cloneTransaction(tx)));
     copy.ledger = [...this.ledger];
-    copy.inbox = new Map(this.inbox);
+    this.inbox.forEach((message, key) => copy.inbox.set(key, cloneInbox(message)));
     this.outbox.forEach((message, id) => copy.outbox.set(id, cloneOutbox(message)));
     return copy;
   }
@@ -201,7 +211,8 @@ class InMemoryWagerTransactionRepository implements WagerTransactionRepository {
       if (
         tx.status === WagerTransactionStatus.PendingReference &&
         tx.providerId === providerId &&
-        tx.referenceExternalTransactionId === externalTransactionId
+        tx.referenceExternalTransactionId === externalTransactionId &&
+        (tx.nextReferenceCheckAt?.getTime() ?? 0) > now.getTime()
       ) {
         this.store.transactions.set(tx.id, cloneTransaction(tx, { nextReferenceCheckAt: now }));
         woken += 1;
@@ -213,14 +224,16 @@ class InMemoryWagerTransactionRepository implements WagerTransactionRepository {
   async claimDuePendingReferences(now: Date, limit: number, leaseUntil: Date): Promise<PendingReferenceCandidate[]> {
     const due = [...this.store.transactions.values()]
       .filter((tx) => tx.status === WagerTransactionStatus.PendingReference && this.isDue(tx, now))
+      .sort((a, b) => (a.nextReferenceCheckAt?.getTime() ?? 0) - (b.nextReferenceCheckAt?.getTime() ?? 0))
       .slice(0, limit);
     due.forEach((tx) => this.store.transactions.set(tx.id, cloneTransaction(tx, { nextReferenceCheckAt: leaseUntil })));
     return due.map((tx) => ({ transactionId: tx.id, walletId: tx.walletId }));
   }
 
-  async lockPendingReference(id: string): Promise<WagerTransaction | null> {
+  async lockPendingReference(id: string, leaseUntil: Date): Promise<WagerTransaction | null> {
     const tx = this.store.transactions.get(id);
-    return tx && tx.status === WagerTransactionStatus.PendingReference ? cloneTransaction(tx) : null;
+    const holdsLease = tx?.nextReferenceCheckAt?.getTime() === leaseUntil.getTime();
+    return tx && tx.status === WagerTransactionStatus.PendingReference && holdsLease ? cloneTransaction(tx) : null;
   }
 
   private isDue(tx: WagerTransaction, now: Date): boolean {
@@ -298,13 +311,13 @@ class InMemoryOutboxRepository implements OutboxRepository {
   async claimDue(now: Date, limit: number): Promise<OutboxMessage[]> {
     return [...this.store.outbox.values()]
       .filter((message) => message.isDue(now))
-      .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime())
+      .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime() || a.id.localeCompare(b.id))
       .slice(0, limit)
       .map(cloneOutbox);
   }
 
   async save(message: OutboxMessage): Promise<void> {
-    if (this.store.outbox.get(message.id)?.isPending() === false) {
+    if (this.store.outbox.get(message.id)?.isPending() !== true) {
       return;
     }
     this.store.outbox.set(message.id, cloneOutbox(message));

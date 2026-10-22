@@ -23,7 +23,7 @@ describe('casos de uso de wallet', () => {
       const [opening] = [...ctx.uow.store.transactions.values()];
 
       expect(wallet).toMatchObject({ balance: { amount: '1000.00', currency: 'BRL' }, version: 1 });
-      expect(opening).toMatchObject({ kind: 'OPENING', status: 'PROCESSED', providerId: 'internal' });
+      expect([opening!.kind, opening!.status, opening!.providerId]).toEqual(['OPENING', 'PROCESSED', 'internal']);
       expect(ctx.uow.store.ledgerFor(wallet.id)).toHaveLength(1);
       expect(ctx.uow.store.outboxTypesFor(opening!.id)).toEqual(['WagerTransactionProcessed']);
       expect(ctx.uow.store.outboxTypesFor(wallet.id)).toEqual(['WalletBalanceChanged']);

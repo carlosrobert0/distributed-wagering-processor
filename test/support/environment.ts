@@ -7,8 +7,9 @@ export const POSTGRES_ADMIN_URL =
   process.env.TEST_POSTGRES_ADMIN_URL ?? 'postgres://wagering:wagering@localhost:5432/postgres';
 export const AWS_ENDPOINT_URL = process.env.AWS_ENDPOINT_URL ?? 'http://localhost:4566';
 
-const TEMPLATE_DATABASE = 'wagering_test_template';
 const TEST_DATABASE_PREFIX = 'wagering_test_';
+const RUN_ID = randomUUID().replace(/-/g, '').slice(0, 8);
+const TEMPLATE_DATABASE = `${TEST_DATABASE_PREFIX}${RUN_ID}_template`;
 
 export function withDatabase(url: string, database: string): string {
   const parsed = new URL(url);
@@ -29,7 +30,7 @@ export function testDatabaseUrl(): string {
 export async function prepareTestDatabase(): Promise<string> {
   template ??= createTemplateDatabase();
   await template;
-  const name = `${TEST_DATABASE_PREFIX}${randomUUID().replace(/-/g, '').slice(0, 16)}`;
+  const name = `${TEST_DATABASE_PREFIX}${RUN_ID}_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
   await withAdmin((admin) => admin.query(`CREATE DATABASE "${name}" TEMPLATE "${TEMPLATE_DATABASE}"`));
   currentDatabaseUrl = withDatabase(POSTGRES_ADMIN_URL, name);
   return currentDatabaseUrl;
@@ -48,11 +49,14 @@ async function createTemplateDatabase(): Promise<void> {
 
 async function dropStaleTestDatabases(): Promise<void> {
   await withAdmin(async (admin) => {
-    const { rows } = await admin.query<{ datname: string }>(`SELECT datname FROM pg_database WHERE datname LIKE $1`, [
-      `${TEST_DATABASE_PREFIX}%`,
-    ]);
+    const { rows } = await admin.query<{ datname: string }>(
+      `SELECT d.datname FROM pg_database d
+        WHERE starts_with(d.datname, $1)
+          AND NOT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname)`,
+      [TEST_DATABASE_PREFIX],
+    );
     for (const { datname } of rows) {
-      await admin.query(`DROP DATABASE IF EXISTS "${datname}" WITH (FORCE)`);
+      await admin.query(`DROP DATABASE IF EXISTS "${datname}"`).catch(() => undefined);
     }
   });
 }

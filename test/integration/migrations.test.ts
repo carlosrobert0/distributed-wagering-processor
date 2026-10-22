@@ -6,7 +6,14 @@ import { POSTGRES_ADMIN_URL, recreateDatabase, withDatabase } from '../support/e
 const DATABASE = 'wagering_migrations_test';
 const URL = withDatabase(POSTGRES_ADMIN_URL, DATABASE);
 
-const TABLES = ['inbox_messages', 'outbox_messages', 'wager_transactions', 'wallet_ledger_entries', 'wallets'];
+const TABLES = [
+  'consumer_message_attempts',
+  'inbox_messages',
+  'outbox_messages',
+  'wager_transactions',
+  'wallet_ledger_entries',
+  'wallets',
+];
 
 async function tables(): Promise<string[]> {
   const client = new Client({ connectionString: URL });
@@ -35,7 +42,10 @@ describe('migrations versionadas e reversíveis (§4, §13 integração)', () =>
     const orm = await createOrm({ url: URL, poolMax: 2 });
     try {
       const up = await orm.migrator.up();
-      expect(up.map((m) => m.name)).toEqual(['Migration20261021000000_initial_schema']);
+      expect(up.map((m) => m.name)).toEqual([
+        'Migration20261021000000_initial_schema',
+        'Migration20261022000000_consumer_message_attempts',
+      ]);
       expect(await tables()).toEqual(TABLES);
 
       expect(await orm.migrator.up()).toEqual([]);

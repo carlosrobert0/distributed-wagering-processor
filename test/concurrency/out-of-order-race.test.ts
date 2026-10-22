@@ -70,7 +70,7 @@ describe('reversão e referência chegando ao mesmo tempo (§13 concorrência 7)
   test('ROLLBACK de WIN chegando junto com a WIN: o crédito é desfeito exatamente uma vez', async () => {
     const wallets = await Promise.all(Array.from({ length: 20 }, () => ctx.api.createWallet('0.00')));
 
-    await Promise.all(
+    const responses = await Promise.all(
       wallets.flatMap((wallet) => {
         const winId = `win-${randomUUID()}`;
         return [
@@ -80,6 +80,7 @@ describe('reversão e referência chegando ao mesmo tempo (§13 concorrência 7)
       }),
     );
 
+    expect(responses.filter((r) => r.status >= 500)).toEqual([]);
     const walletIds = wallets.map((wallet) => wallet.id);
     await waitFor(async () => (await pendingFor(walletIds)) === 0, { timeoutMs: 30_000 });
 

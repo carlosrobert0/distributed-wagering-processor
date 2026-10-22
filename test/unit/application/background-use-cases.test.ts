@@ -108,17 +108,18 @@ describe('PublishOutboxUseCase', () => {
     expect(await ctx.publishOutbox.publishBatch(10)).toEqual({ claimed: 0, published: 0, failed: 0 });
   });
 
-  test('falha do broker: backoff no evento que falhou, resto do lote devolvido, nada perdido', async () => {
+  test('falha do broker: o evento e o resto do lote esperam o mesmo backoff (ordem preservada)', async () => {
     await ctx.openWallet('100.00');
     ctx.publisher.failuresLeft = 2;
 
     expect(await ctx.publishOutbox.publishBatch(10)).toEqual({ claimed: 2, published: 0, failed: 1 });
-    const [failed, released] = [...ctx.uow.store.outbox.values()];
-    expect(failed).toMatchObject({ attempts: 1, lastError: 'broker unavailable' });
-    expect(released).toMatchObject({ attempts: 0 });
-    expect(released!.isDue(ctx.clock.now())).toBe(true);
+    const [failed, held] = [...ctx.uow.store.outbox.values()].sort((a, b) => a.eventType.localeCompare(b.eventType));
+    expect(failed!.attempts + held!.attempts).toBe(1);
+    expect(failed!.nextAttemptAt).toEqual(held!.nextAttemptAt);
+    expect(await ctx.publishOutbox.publishBatch(10)).toEqual({ claimed: 0, published: 0, failed: 0 });
 
-    expect(await ctx.publishOutbox.publishBatch(10)).toEqual({ claimed: 1, published: 0, failed: 1 });
+    ctx.clock.advance(1_000);
+    expect(await ctx.publishOutbox.publishBatch(10)).toEqual({ claimed: 2, published: 0, failed: 1 });
 
     ctx.clock.advance(2_000);
     expect(await ctx.publishOutbox.publishBatch(10)).toEqual({ claimed: 2, published: 2, failed: 0 });

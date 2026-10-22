@@ -14,6 +14,12 @@ function currentPool(): Pool {
   return pool;
 }
 
+export async function closeTestPools(): Promise<void> {
+  const open = [...pools.values()];
+  pools.clear();
+  await Promise.all(open.map((pool) => pool.end()));
+}
+
 export const db = {
   query<R extends QueryResultRow = QueryResultRow>(text: string, params: unknown[] = []): Promise<QueryResult<R>> {
     return currentPool().query<R>(text, params);

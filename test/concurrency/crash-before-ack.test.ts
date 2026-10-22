@@ -63,7 +63,7 @@ describe('worker morto entre commit e ack', () => {
         { timeoutMs: 30_000, description: 'redelivered message acked' },
       );
       const metrics = await fetch(`${healthy.api.baseUrl}/metrics`).then((r) => r.text());
-      expect(metrics).toMatch(/wagering_duplicates_total\{[^}]*type="inbox_duplicate"[^}]*\} 1/);
+      expect(metrics).toMatch(/wagering_duplicates_total\{[^}]*type="inbox_duplicate"[^}]*\} 1$/m);
     } finally {
       await healthy.close();
     }

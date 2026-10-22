@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import pino from 'pino';
 import { PublishOutboxUseCase } from '../../src/application/messaging/publish-outbox.use-case';
@@ -32,6 +32,8 @@ describe('outbox relay', () => {
     instanceA = await buildUseCases();
     instanceB = await buildUseCases();
   });
+
+  beforeEach(() => db.query(`UPDATE outbox_messages SET published_at = now() WHERE published_at IS NULL`));
 
   afterEach(() => expectAllWalletsMatchLedger());
 
@@ -152,7 +154,7 @@ describe('outbox relay', () => {
     await drainMessages(queues.events);
   });
 
-  test('falha de publicação → attempts++ e backoff; o resto do lote é devolvido; nada é perdido (AC-OUT-07)', async () => {
+  test('falha de publicação → backoff no evento e no resto do lote (ordem preservada); nada é perdido (AC-OUT-07)', async () => {
     const walletIds = await produceEvents(1, 1);
     let failuresLeft = 2;
     const flaky: EventPublisher = {
@@ -167,14 +169,17 @@ describe('outbox relay', () => {
     const useCase = relay(instanceA, flaky);
 
     expect(await useCase.publishBatch(50)).toMatchObject({ published: 0, failed: 1 });
-    const { rows } = await db.query<{ attempts: number; last_error: string | null; backed_off: boolean }>(
-      `SELECT attempts, last_error, next_attempt_at > occurred_at + interval '500 milliseconds' AS backed_off
+    const { rows } = await db.query<{ attempts: number; last_error: string | null; backed_off: boolean; due: string }>(
+      `SELECT attempts, last_error, next_attempt_at > occurred_at + interval '500 milliseconds' AS backed_off,
+              next_attempt_at::text AS due
          FROM outbox_messages WHERE partition_key = ANY($1) AND published_at IS NULL ORDER BY occurred_at, id`,
       [walletIds],
     );
     expect(rows).toHaveLength(4);
-    expect(rows[0]).toEqual({ attempts: 1, last_error: 'SQS unavailable', backed_off: true });
+    expect(rows[0]).toMatchObject({ attempts: 1, last_error: 'SQS unavailable', backed_off: true });
     expect(rows.slice(1).every((row) => row.attempts === 0 && row.last_error === null)).toBe(true);
+    expect(new Set(rows.map((row) => row.due)).size).toBe(1);
+    expect((await relay(instanceB).publishBatch(50)).claimed).toBe(0);
 
     for (let i = 0; i < 10 && (await pendingFor(walletIds)) > 0; i++) {
       await forceDue(walletIds);

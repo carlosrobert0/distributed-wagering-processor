@@ -227,7 +227,7 @@ describe('consumer SQS — limite de tentativas e DLQ por redrive (AC-SQS-06)', 
     const metrics = await fetch(`${ctx.api.baseUrl}/metrics`).then((r) => r.text());
     expect(metrics).toMatch(/wagering_retries_total\{[^}]*component="sqs_consumer"[^}]*\} [1-9]/);
     expect(metrics).toMatch(/wagering_lock_conflicts_total\{[^}]*kind="lock_timeout"[^}]*\} [1-9]/);
-    expect(metrics).toMatch(/wagering_dlq_messages_total\{[^}]*reason="max_attempts"[^}]*\} 1/);
+    expect(metrics).toMatch(/wagering_dlq_messages_total\{[^}]*reason="max_attempts"[^}]*\} 1$/m);
   });
 });
 
