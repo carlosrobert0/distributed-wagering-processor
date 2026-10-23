@@ -233,6 +233,31 @@ describe('outbox relay', () => {
     await drainMessages(queues.events);
   });
 
+  test('o backlog (pendentes e idade do mais antigo) é refletido nas métricas e zera depois de publicar', async () => {
+    await produceEvents(1, 0);
+    const metrics = new PrometheusMetrics({ collectDefaults: false });
+    const useCase = new PublishOutboxUseCase(
+      instanceA.uow,
+      new SqsEventPublisher(sqsQueues, queues.events),
+      clock,
+      metrics,
+      logger,
+    );
+
+    await useCase.refreshBacklogMetrics();
+    const before = await metrics.registry.metrics();
+    expect(before).toMatch(/^wagering_outbox_pending 2$/m);
+    expect(before).toMatch(/^wagering_outbox_lag_seconds [0-9.]+$/m);
+
+    await useCase.publishBatch(50);
+    await useCase.refreshBacklogMetrics();
+    const after = await metrics.registry.metrics();
+    expect(after).toMatch(/^wagering_outbox_pending 0$/m);
+    expect(after).toMatch(/^wagering_outbox_lag_seconds 0$/m);
+    expect(after).toMatch(/^wagering_outbox_published_total 2$/m);
+    await drainMessages(queues.events);
+  });
+
   test('publicação duplicada é segura: mesmo eventId, deduplicado pela fila FIFO (AC-OUT-04)', async () => {
     const walletIds = await produceEvents(1, 0);
     const { rows } = await db.query<{ id: string }>(`SELECT id FROM outbox_messages WHERE partition_key = $1 LIMIT 1`, [

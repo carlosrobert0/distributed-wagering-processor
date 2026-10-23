@@ -18,8 +18,8 @@ import {
   InMemoryUnitOfWork,
   RandomIds,
   RecordingMetrics,
+  RecordingLogger,
   RecordingPublisher,
-  SilentLogger,
 } from './in-memory';
 
 export const HTTP: ProcessingContext = { correlationId: 'test', source: 'http' };
@@ -29,7 +29,7 @@ export function buildInMemoryContext() {
   const clock = new FixedClock();
   const ids = new RandomIds();
   const metrics = new RecordingMetrics();
-  const logger = new SilentLogger();
+  const logger = new RecordingLogger();
   const publisher = new RecordingPublisher();
   const settlement = new WagerSettlementService(ids, clock, metrics, new ExponentialBackoff(1_000, 8_000, 3));
 
@@ -40,6 +40,7 @@ export function buildInMemoryContext() {
     uow,
     clock,
     metrics,
+    logger,
     publisher,
     processWager,
     createWallet,

@@ -1,34 +1,44 @@
 import { LoggerService } from '@nestjs/common';
-import pino, { Logger } from 'pino';
+import pino, { DestinationStream, Logger } from 'pino';
 import { AppLogger, LogFields } from '../../application/ports/system';
 import { RequestContextStore } from './request-context';
 
-export function createPinoLogger(options: { level: string; instanceId: string }): Logger {
-  return pino({
-    level: options.level,
-    base: { service: 'wagering-processor', instance: options.instanceId },
-    timestamp: pino.stdTimeFunctions.isoTime,
-    messageKey: 'message',
-    formatters: { level: (label) => ({ level: label }) },
-    mixin: () => {
-      const context = RequestContextStore.current();
-      return context ? { correlationId: context.correlationId, messageId: context.messageId } : {};
+export interface PinoLoggerOptions {
+  level: string;
+  instanceId: string;
+  destination?: DestinationStream;
+}
+
+export function createPinoLogger(options: PinoLoggerOptions): Logger {
+  return pino(
+    {
+      level: options.level,
+      base: { service: 'wagering-processor', instance: options.instanceId },
+      timestamp: pino.stdTimeFunctions.isoTime,
+      messageKey: 'message',
+      formatters: { level: (label) => ({ level: label }) },
+      mixin: () => {
+        const context = RequestContextStore.current();
+        return context ? { correlationId: context.correlationId, messageId: context.messageId } : {};
+      },
+      serializers: { err: serializeError },
+      redact: {
+        paths: [
+          'amount',
+          'money',
+          'balance',
+          'balanceAfter',
+          'balanceBefore',
+          'payload',
+          '*.amount',
+          '*.payload',
+          'authorization',
+        ],
+        censor: '[REDACTED]',
+      },
     },
-    redact: {
-      paths: [
-        'amount',
-        'money',
-        'balance',
-        'balanceAfter',
-        'balanceBefore',
-        'payload',
-        '*.amount',
-        '*.payload',
-        'authorization',
-      ],
-      censor: '[REDACTED]',
-    },
-  });
+    options.destination,
+  );
 }
 
 export class PinoAppLogger implements AppLogger {
@@ -81,17 +91,20 @@ function clean(fields: LogFields | undefined): Record<string, unknown> {
 }
 
 function withError(fields: LogFields | undefined, error: unknown): Record<string, unknown> {
-  return { ...clean(fields), ...(error !== undefined ? { err: serializeError(error) } : {}) };
+  return { ...clean(fields), ...(error !== undefined ? { err: error } : {}) };
 }
 
-function serializeError(error: unknown): Record<string, unknown> {
-  if (error instanceof Error) {
-    return {
-      type: error.name,
-      message: error.message,
-      code: (error as { code?: unknown }).code,
-      stack: error.stack,
-    };
-  }
-  return { message: String(error) };
+const DECIMAL_AMOUNT = /(?<![\w.])-?\d+\.\d{2}(?![\w.])/g;
+const MASKED_AMOUNT = '[AMOUNT]';
+
+export function maskAmounts(text: string): string {
+  return text.replace(DECIMAL_AMOUNT, MASKED_AMOUNT);
+}
+
+export function serializeError(error: unknown): Record<string, unknown> {
+  const serialized: Record<string, unknown> =
+    error instanceof Error ? { ...pino.stdSerializers.err(error) } : { message: String(error) };
+  return Object.fromEntries(
+    Object.entries(serialized).map(([key, value]) => [key, typeof value === 'string' ? maskAmounts(value) : value]),
+  );
 }

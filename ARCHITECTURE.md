@@ -126,7 +126,7 @@ simples (uma linha por movimento); partidas dobradas ficaram fora (opcional no e
 
 | Recurso | Uso |
 |---|---|
-| `EntitySchema` (sem decorators) | Records de persistência separados do domínio; evita depender de `emitDecoratorMetadata`/`reflect-metadata` no ORM sob Bun. |
+| `EntitySchema` (sem decorators) | Records de persistência separados do domínio; evita depender de decorators/metadados do ORM sob Bun. `emitDecoratorMetadata` fica desligado no `tsconfig`: o Bun passava a exigir valor de runtime para interfaces usadas em construtores decorados, e os controllers já injetam por `@Inject` explícito. |
 | `em.fork()` + `em.transactional()` | Um contexto isolado por transação; nada compartilhado entre requisições concorrentes da mesma instância. |
 | `LockMode.PESSIMISTIC_WRITE` / `PESSIMISTIC_READ` | `FOR UPDATE` na wallet (escrita) e `FOR SHARE` (reconciliação). |
 | `LockMode.PESSIMISTIC_PARTIAL_WRITE` | `FOR UPDATE SKIP LOCKED` no relay da outbox e no worker de referências. |
@@ -313,7 +313,7 @@ inbox (e a idempotency key) → só faz ack. Testado com um processo real morto 
 - Eventos gravados em `outbox_messages` **na mesma transação** do efeito. Nada é publicado antes do commit.
 - **Relay** (em todas as instâncias), em três passos:
   1. transação curta: `SELECT … WHERE published_at IS NULL AND next_attempt_at <= now() ORDER BY occurred_at
-     FOR UPDATE SKIP LOCKED LIMIT N` e **lease** (`next_attempt_at = now + 60s`) → commit;
+     FOR UPDATE SKIP LOCKED LIMIT N` e **lease** (`next_attempt_at = now + OUTBOX_LEASE_MS`, padrão 30 s) → commit;
   2. publica no SQS **fora de transação** (cliente com timeout de conexão/requisição);
   3. grava `published_at` com `UPDATE … WHERE published_at IS NULL`; retry e devolução do lote só são
      gravados se a instância ainda detém o lease (`AND next_attempt_at = lease`).
@@ -397,7 +397,8 @@ Ligar a autenticação = registrar outra implementação da porta, sem tocar em 
 |---|---|---|
 | Unidade — domínio | Money, Wallet, ledger, máquina de estados, regras BET/WIN/LOSS/REFUND/ROLLBACK, backoff, hash canônico | `test/unit/domain` |
 | Unidade — aplicação | orquestração dos use cases (replay, conflitos, inbox, corrida de unicidade, PENDING_REFERENCE, outbox) sobre um `UnitOfWork` em memória com commit/rollback | `test/unit/application` |
-| Unidade — bordas | erro → status HTTP, resultado → status, classificação SQS, SQLSTATE → transitório, decisões do handler SQS, guard, config | `test/unit/interfaces` |
+| Unidade — bordas | erro → status HTTP, resultado → status, classificação SQS, SQLSTATE → transitório, decisões do handler SQS, guard, config; **consumer SQS** com cliente roteirizado (poll que falha, retry com ordem do grupo, tentativas reais, DLQ, ack que falha, heartbeat, shutdown com grace estourado); ticks dos workers | `test/unit/interfaces` |
+| Unidade — infraestrutura | logs estruturados (campos, contexto por mensagem, serialização de erro, mascaramento de valores monetários, redação) | `test/unit/infrastructure` |
 | Integração | migrations up/down, cada constraint/trigger, atomicidade (falha injetada antes do commit), API, outbox (2 publishers, crash, retry, duplicata), consumer (inbox, redelivery, retry, DLQ, shutdown), fora de ordem | `test/integration` |
 | Concorrência | 100−80−80 (25×), hot wallet, 50× mesma aposta, wallets em paralelo, BET/WIN e REFUND/ROLLBACK simultâneos, 3 processos, crash antes do ack, SIGKILL + reinício | `test/concurrency` |
 
@@ -408,6 +409,12 @@ Ligar a autenticação = registrar outra implementação da porta, sem tocar em 
   separados via `Bun.spawn` (`bun run src/main.ts`).
 - **Invariante final:** `expectWalletMatchesLedger` / `expectAllWalletsMatchLedger` recalculam o saldo
   pelo ledger em NUMERIC e conferem encadeamento e versão.
+- **Execução e cobertura (medidas):** 383 testes em 31 arquivos, ~50 s contra Postgres e LocalStack reais; cobertura
+  de 98 % das linhas e das funções (`bun test --coverage`). O que não aparece como coberto roda só em
+  processos filhos (injeção de falha `crash-after-commit`) e é exercitado pelos testes de concorrência.
+- **Mutação manual:** os testes do consumer foram validados quebrando comportamentos de propósito
+  (devolver mensagens no shutdown, zerar o contador de tentativas, finalizar mensagens para o heartbeat) e
+  conferindo que o teste certo falha.
 - **Determinismo:** cada arquivo recebe um banco próprio (clone de um template migrado) e filas próprias,
   então workers de instâncias de um teste nunca processam dados de outro; esperas são por condição
   (`waitFor`), nunca `sleep` cego para asserção; filas são drenadas apagando as mensagens (sem isso o FIFO
@@ -417,7 +424,41 @@ Ligar a autenticação = registrar outra implementação da porta, sem tocar em 
 
 ---
 
-## 14. Convenções de código
+## 14. Teste de carga (`bun run test:load`)
+
+**Ambiente.** MacBook (Apple M4 Pro, 14 núcleos, 24 GB), OrbStack com 14 CPUs e ~12 GB para a VM. Tudo
+roda na **mesma máquina**: Postgres 17, LocalStack, as 3 instâncias da aplicação (containers `app-1..3`) e o
+próprio gerador de carga competem pelos mesmos núcleos. Não há rede real entre os componentes.
+
+**Metodologia.** 50 wallets com saldo alto (1.000.000,00); 5.000 apostas `BET` de 1,00 com concorrência de 64,
+distribuídas em round-robin entre as 3 instâncias; 5 % das wallets (2) recebem 50 % do tráfego (wallets
+quentes); 10 % das requisições são reenviadas (duplicatas) para medir também o caminho de replay. Ao final,
+`POST /wallets/:id/reconciliation` em todas as wallets. Consumer SQS, relay da outbox e worker de referências
+ligados durante o teste.
+
+**Resultado (uma execução, não uma média).**
+
+| Métrica | Valor |
+|---|---|
+| Requisições | 5.506 (5.000 originais + 506 duplicatas) |
+| Vazão | ~903 req/s |
+| Latência p50 / p95 / p99 | 25 ms / 330 ms / 615 ms |
+| Taxa de erro (5xx e falhas de rede) | 0 % |
+| Status | 5.000 × 201, 506 × 200 (replay) |
+| Conflitos de lock (503) | 0 |
+| Lag da outbox ao fim da carga | ~4,6 s (dreno em andamento) |
+| Wallets inconsistentes na reconciliação | 0 de 50 |
+
+**Como ler.** A cauda (p95/p99) vem das duas wallets quentes: cada aposta nelas espera a anterior, porque o
+lock é pessimista por wallet — é o custo declarado na seção 5. As 48 demais escalam em paralelo. O lag da
+outbox mostra que o relay (lotes de 50 a cada 500 ms por instância) fica atrás do pico de escrita e se
+recupera depois; com mais vazão sustentada seria preciso aumentar o lote ou o número de instâncias.
+
+**O que o número não prova.** Não é um teste de capacidade: gerador e sistema dividem a máquina, o Postgres
+roda com configuração padrão e sem rede real, e foi uma execução única. Serve para mostrar que, sob
+contenção, nada quebra (0 erros, 0 inconsistências) e onde está o gargalo — não para prometer RPS.
+
+## 15. Convenções de código
 
 - Sem comentários no código: nomes de classes, métodos, constantes e constraints carregam a intenção;
   o *porquê* das decisões vive neste documento e no `SPEC.md`.
@@ -429,10 +470,10 @@ Ligar a autenticação = registrar outra implementação da porta, sem tocar em 
 - Erros de entrada de JSON (malformado, grande demais) são tratados por um parser próprio e respondem no
   mesmo formato `{ error, message }` do resto da API.
 
-## 15. Trade-offs e limitações conhecidas
+## 16. Trade-offs e limitações conhecidas
 
 - **Throughput por wallet é serializado** (lock pessimista). Correto para dinheiro; escala por wallets.
-- **Lease da outbox (60 s):** o relay para de publicar 10 s antes do lease expirar e devolve o resto; se
+- **Lease (outbox e worker de referências, 30 s por padrão, configurável):** o relay para de publicar na margem de segurança (1/4 do lease, no máximo 10 s) e devolve o resto; o lease também é o tempo de recuperação após a morte de uma instância no meio de um lote (o teste de reinício usa 2 s). Se
   ainda assim uma publicação passar do lease, outra instância pode republicar o evento — continua
   at-least-once com o mesmo `eventId`, e a gravação só acontece se o evento ainda não foi publicado.
 - **Head-of-line entre grupos:** o consumer só busca o próximo lote quando o atual termina; um grupo lento

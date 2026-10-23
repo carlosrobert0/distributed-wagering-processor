@@ -22,7 +22,7 @@ mensagens duplicadas, fora de ordem e processadas por várias instâncias ao mes
 
 ## Como rodar
 
-Pré-requisitos: **Bun ≥ 1.2** e **Docker** (Docker Desktop, OrbStack ou Colima).
+Pré-requisitos: **Bun ≥ 1.4** (o `bun.lock` e a imagem Docker usam 1.4.4) e **Docker** (Docker Desktop, OrbStack ou Colima).
 
 ```bash
 bun install

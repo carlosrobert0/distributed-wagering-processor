@@ -435,3 +435,34 @@ export class RecordingPublisher implements EventPublisher {
     this.published.push(message.id);
   }
 }
+
+export interface RecordedLog {
+  level: 'debug' | 'info' | 'warn' | 'error';
+  message: string;
+  fields?: Record<string, unknown>;
+  error?: unknown;
+}
+
+export class RecordingLogger implements AppLogger {
+  readonly entries: RecordedLog[] = [];
+
+  has(level: RecordedLog['level'], message: string): boolean {
+    return this.entries.some((entry) => entry.level === level && entry.message === message);
+  }
+
+  debug(message: string, fields?: Record<string, unknown>): void {
+    this.entries.push({ level: 'debug', message, fields });
+  }
+
+  info(message: string, fields?: Record<string, unknown>): void {
+    this.entries.push({ level: 'info', message, fields });
+  }
+
+  warn(message: string, fields?: Record<string, unknown>, error?: unknown): void {
+    this.entries.push({ level: 'warn', message, fields, error });
+  }
+
+  error(message: string, fields?: Record<string, unknown>, error?: unknown): void {
+    this.entries.push({ level: 'error', message, fields, error });
+  }
+}

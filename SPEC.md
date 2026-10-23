@@ -176,7 +176,7 @@ Erros que **não** viram transação persistida (respondidos diretamente): `INVA
 | ID | Critério de aceite |
 |---|---|
 | AC-OUT-01 | Transação, saldo, ledger, inbox e evento gravados atomicamente |
-| AC-OUT-02 | Relay com múltiplos publishers concorrentes: claim com `FOR UPDATE SKIP LOCKED` + lease de 60 s em transação curta; publicação fora da transação |
+| AC-OUT-02 | Relay com múltiplos publishers concorrentes: claim com `FOR UPDATE SKIP LOCKED` + lease configurável (`OUTBOX_LEASE_MS`, padrão 30 s) em transação curta; publicação fora da transação |
 | AC-OUT-03 | Commit → processo morre → outra instância publica |
 | AC-OUT-04 | Publicação duplicada é segura (`eventId` estável = `MessageDeduplicationId`; consumidor deduplica por `eventId`) |
 | AC-OUT-05 | Eventos: `WagerTransactionProcessed` (inclusive LOSS e OPENING), `WagerTransactionRejected`, `WalletBalanceChanged` (somente quando o saldo muda), `WagerTransactionPendingReference` |

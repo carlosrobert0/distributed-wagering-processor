@@ -22,12 +22,15 @@ export interface WagerConsumerOptions {
   retryMaxSeconds: number;
   shutdownGraceMs: number;
   faultInjection: 'none' | 'crash-after-commit';
+  pollFailureBackoffMs?: number;
+  heartbeatIntervalMs?: number;
 }
 
 export type MessageDisposition = 'acked' | 'retry-scheduled' | 'dead-lettered';
 
 const MAX_VISIBILITY_TIMEOUT_SECONDS = 43_200;
-const POLL_FAILURE_BACKOFF_MS = 1_000;
+const DEFAULT_POLL_FAILURE_BACKOFF_MS = 1_000;
+const MIN_HEARTBEAT_INTERVAL_MS = 1_000;
 const MAX_DEAD_LETTER_REASON_LENGTH = 1_000;
 
 interface InFlightMessage {
@@ -89,7 +92,7 @@ export class WagerTransactionsConsumer {
       } catch (error) {
         if (!this.running) break;
         this.logger.warn('sqs poll failed; backing off', {}, error);
-        await sleep(POLL_FAILURE_BACKOFF_MS);
+        await sleep(this.options.pollFailureBackoffMs ?? DEFAULT_POLL_FAILURE_BACKOFF_MS);
       }
     }
   }
@@ -258,7 +261,9 @@ export class WagerTransactionsConsumer {
   }
 
   private startVisibilityHeartbeat(): ReturnType<typeof setInterval> {
-    const extendEveryMs = Math.max(1_000, (this.options.visibilityTimeoutSeconds * 1_000) / 2);
+    const extendEveryMs =
+      this.options.heartbeatIntervalMs ??
+      Math.max(MIN_HEARTBEAT_INTERVAL_MS, (this.options.visibilityTimeoutSeconds * 1_000) / 2);
     return setInterval(() => {
       for (const entry of this.inFlight.values()) {
         void this.changeVisibility(entry, this.options.visibilityTimeoutSeconds);

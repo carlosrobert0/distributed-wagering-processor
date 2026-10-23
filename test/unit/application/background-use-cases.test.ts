@@ -133,3 +133,94 @@ describe('PublishOutboxUseCase', () => {
     expect(ctx.publisher.published).toHaveLength(2);
   });
 });
+
+describe('lease expirado no meio do lote', () => {
+  let ctx: InMemoryContext;
+
+  beforeEach(() => {
+    ctx = buildInMemoryContext();
+  });
+
+  test('outbox: ao se aproximar do fim do lease, o relay devolve o resto do lote sem publicar', async () => {
+    await ctx.openWallet('100.00');
+    const publish = ctx.publisher.publish.bind(ctx.publisher);
+    ctx.publisher.publish = async (message) => {
+      await publish(message);
+      ctx.clock.advance(25_000);
+    };
+
+    expect(await ctx.publishOutbox.publishBatch(10)).toEqual({ claimed: 2, published: 1, failed: 0 });
+
+    const stillPending = [...ctx.uow.store.outbox.values()].filter((message) => message.isPending());
+    expect(stillPending).toHaveLength(1);
+    expect(stillPending[0]!.isDue(ctx.clock.now())).toBe(true);
+    expect(await ctx.publishOutbox.publishBatch(10)).toEqual({ claimed: 1, published: 1, failed: 0 });
+  });
+
+  test('outbox: falha ao gravar a publicação é registrada e o relay para sem mascarar o erro', async () => {
+    await ctx.openWallet('100.00');
+    const run = ctx.uow.run.bind(ctx.uow);
+    let calls = 0;
+    ctx.uow.run = async <T>(work: (scope: TransactionScope) => Promise<T>): Promise<T> => {
+      calls += 1;
+      if (calls === 2) throw new TransientInfrastructureError('db down', 'connection');
+      return run(work);
+    };
+
+    expect(await ctx.publishOutbox.publishBatch(10)).toEqual({ claimed: 2, published: 0, failed: 0 });
+    expect(
+      ctx.logger.has(
+        'error',
+        'could not record outbox publication; the lease will expire and the event may be republished',
+      ),
+    ).toBe(true);
+  });
+
+  test('outbox: falha ao devolver o lote não derruba o relay', async () => {
+    await ctx.openWallet('100.00');
+    ctx.publisher.failuresLeft = 1;
+    const run = ctx.uow.run.bind(ctx.uow);
+    let calls = 0;
+    ctx.uow.run = async <T>(work: (scope: TransactionScope) => Promise<T>): Promise<T> => {
+      calls += 1;
+      if (calls === 3) throw new TransientInfrastructureError('db down', 'connection');
+      return run(work);
+    };
+
+    expect(await ctx.publishOutbox.publishBatch(10)).toEqual({ claimed: 2, published: 0, failed: 1 });
+    expect(ctx.logger.has('warn', 'could not release outbox lease; it will expire on its own')).toBe(true);
+  });
+
+  test('worker de referências: não processa candidatas depois que o lease passou da margem', async () => {
+    const first = await pendingRefundWoken(ctx, 'bet-a');
+    const second = await pendingRefundWoken(ctx, 'bet-b');
+    const run = ctx.uow.run.bind(ctx.uow);
+    let calls = 0;
+    ctx.uow.run = async <T>(work: (scope: TransactionScope) => Promise<T>): Promise<T> => {
+      calls += 1;
+      const result = await run(work);
+      if (calls === 2) ctx.clock.advance(25_000);
+      return result;
+    };
+
+    const result = await ctx.retryPending.runOnce(10);
+
+    expect(result).toEqual({ candidates: 2, settled: 1, stillPending: 0, failed: 0 });
+    const statuses = [first, second].map((id) => ctx.uow.store.transactions.get(id)!.status);
+    expect(statuses.sort()).toEqual([WagerTransactionStatus.PendingReference, WagerTransactionStatus.Processed]);
+
+    ctx.clock.advance(10_000);
+    ctx.uow.run = run;
+    expect(await ctx.retryPending.runOnce(10)).toMatchObject({ candidates: 1, settled: 1 });
+  });
+});
+
+async function pendingRefundWoken(ctx: InMemoryContext, reference: string): Promise<string> {
+  const wallet = await ctx.openWallet('100.00');
+  const refund = await ctx.processWager.execute(
+    ctx.command(wallet, { kind: 'REFUND', referenceExternalTransactionId: reference }),
+    HTTP,
+  );
+  await ctx.processWager.execute(ctx.command(wallet, { externalTransactionId: reference }), HTTP);
+  return refund.transactionId;
+}
