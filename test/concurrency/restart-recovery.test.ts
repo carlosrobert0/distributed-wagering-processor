@@ -25,6 +25,7 @@ describe('reinício com consistência final', () => {
       CONSUMER_VISIBILITY_TIMEOUT_SECONDS: '3',
       OUTBOX_RELAY_ENABLED: 'true',
       OUTBOX_RELAY_INTERVAL_MS: '100',
+      OUTBOX_LEASE_MS: '2000',
       PENDING_REFERENCE_WORKER_ENABLED: 'true',
     };
     const instanceA = await spawnInstance('instance-a', queues, workerEnv);

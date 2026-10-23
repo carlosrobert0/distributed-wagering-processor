@@ -1,4 +1,5 @@
 import { OutboxMessage } from '../../domain/messaging/outbox-message';
+import { DEFAULT_LEASE_POLICY, LeasePolicy } from '../lease-policy';
 import { AppLogger, Clock, EventPublisher, Metrics } from '../ports/system';
 import { UnitOfWork } from '../ports/unit-of-work';
 
@@ -8,9 +9,6 @@ export interface OutboxRelayResult {
   failed: number;
 }
 
-export const OUTBOX_LEASE_MS = 60_000;
-export const OUTBOX_LEASE_SAFETY_MARGIN_MS = 10_000;
-
 export class PublishOutboxUseCase {
   constructor(
     private readonly uow: UnitOfWork,
@@ -18,10 +16,11 @@ export class PublishOutboxUseCase {
     private readonly clock: Clock,
     private readonly metrics: Metrics,
     private readonly logger: AppLogger,
+    private readonly lease: LeasePolicy = DEFAULT_LEASE_POLICY,
   ) {}
 
   async publishBatch(batchSize: number): Promise<OutboxRelayResult> {
-    const leaseUntil = new Date(this.clock.now().getTime() + OUTBOX_LEASE_MS);
+    const leaseUntil = this.lease.expiresAt(this.clock.now());
     const leased = await this.claimAndLease(batchSize, leaseUntil);
     const result: OutboxRelayResult = { claimed: leased.length, published: 0, failed: 0 };
 
@@ -69,7 +68,7 @@ export class PublishOutboxUseCase {
   }
 
   private leaseStillValid(leaseUntil: Date): boolean {
-    return this.clock.now().getTime() < leaseUntil.getTime() - OUTBOX_LEASE_SAFETY_MARGIN_MS;
+    return this.lease.isStillValid(this.clock.now(), leaseUntil);
   }
 
   private async publish(message: OutboxMessage): Promise<boolean> {

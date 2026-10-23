@@ -2,6 +2,7 @@ import { FailureCode } from '../../domain/wagering/failure-code';
 import { SettlementOutcome } from '../../domain/wagering/wager-settlement';
 import { WagerTransactionStatus } from '../../domain/wagering/wager-transaction';
 import { TransientInfrastructureError } from '../errors';
+import { DEFAULT_LEASE_POLICY, LeasePolicy } from '../lease-policy';
 import { PendingReferenceCandidate } from '../ports/repositories';
 import { AppLogger, Clock, Metrics } from '../ports/system';
 import { UnitOfWork } from '../ports/unit-of-work';
@@ -14,9 +15,6 @@ export interface PendingReferenceRunResult {
   failed: number;
 }
 
-export const PENDING_REFERENCE_LEASE_MS = 30_000;
-export const PENDING_REFERENCE_LEASE_SAFETY_MARGIN_MS = 5_000;
-
 type CandidateOutcome = 'settled' | 'still-pending' | 'skipped' | 'deferred' | 'failed';
 
 export class RetryPendingReferencesUseCase {
@@ -26,11 +24,12 @@ export class RetryPendingReferencesUseCase {
     private readonly clock: Clock,
     private readonly metrics: Metrics,
     private readonly logger: AppLogger,
+    private readonly lease: LeasePolicy = DEFAULT_LEASE_POLICY,
   ) {}
 
   async runOnce(batchSize: number): Promise<PendingReferenceRunResult> {
     const now = this.clock.now();
-    const leaseUntil = new Date(now.getTime() + PENDING_REFERENCE_LEASE_MS);
+    const leaseUntil = this.lease.expiresAt(now);
     const candidates = await this.uow.run((scope) =>
       scope.transactions.claimDuePendingReferences(now, batchSize, leaseUntil),
     );
@@ -49,7 +48,7 @@ export class RetryPendingReferencesUseCase {
   }
 
   private leaseStillValid(leaseUntil: Date): boolean {
-    return this.clock.now().getTime() < leaseUntil.getTime() - PENDING_REFERENCE_LEASE_SAFETY_MARGIN_MS;
+    return this.lease.isStillValid(this.clock.now(), leaseUntil);
   }
 
   private async retry(candidate: PendingReferenceCandidate, leaseUntil: Date): Promise<CandidateOutcome> {

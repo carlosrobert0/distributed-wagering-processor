@@ -49,8 +49,8 @@ async function createTemplateDatabase(): Promise<void> {
 export async function dropRunDatabases(): Promise<void> {
   await withAdmin(async (admin) => {
     const { rows } = await admin.query<{ datname: string }>(
-      `SELECT datname FROM pg_database WHERE starts_with(datname, $1) AND datname <> $2`,
-      [`${TEST_DATABASE_PREFIX}${RUN_ID}_`, TEMPLATE_DATABASE],
+      `SELECT datname FROM pg_database WHERE starts_with(datname, $1)`,
+      [`${TEST_DATABASE_PREFIX}${RUN_ID}_`],
     );
     for (const { datname } of rows) {
       await admin.query(`DROP DATABASE IF EXISTS "${datname}" WITH (FORCE)`);

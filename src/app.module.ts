@@ -2,6 +2,7 @@ import { MikroORM } from '@mikro-orm/postgresql';
 import { DynamicModule, Module, OnApplicationShutdown, Provider } from '@nestjs/common';
 import { APP_GUARD, Reflector } from '@nestjs/core';
 import type { Logger } from 'pino';
+import { LeasePolicy } from './application/lease-policy';
 import { PublishOutboxUseCase } from './application/messaging/publish-outbox.use-case';
 import {
   APP_LOGGER,
@@ -149,7 +150,7 @@ export class AppModule {
       {
         provide: PublishOutboxUseCase,
         useFactory: (uow: UnitOfWork, publisher: EventPublisher, clock: Clock, metrics: Metrics, logger: AppLogger) =>
-          new PublishOutboxUseCase(uow, publisher, clock, metrics, logger),
+          new PublishOutboxUseCase(uow, publisher, clock, metrics, logger, new LeasePolicy(config.outboxRelay.leaseMs)),
         inject: [UNIT_OF_WORK, EVENT_PUBLISHER, CLOCK, METRICS, APP_LOGGER],
       },
       {
@@ -160,7 +161,15 @@ export class AppModule {
           clock: Clock,
           metrics: Metrics,
           logger: AppLogger,
-        ) => new RetryPendingReferencesUseCase(uow, settlement, clock, metrics, logger),
+        ) =>
+          new RetryPendingReferencesUseCase(
+            uow,
+            settlement,
+            clock,
+            metrics,
+            logger,
+            new LeasePolicy(config.pendingReference.leaseMs),
+          ),
         inject: [UNIT_OF_WORK, WagerSettlementService, CLOCK, METRICS, APP_LOGGER],
       },
 
