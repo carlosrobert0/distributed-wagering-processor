@@ -399,7 +399,7 @@ Ligar a autenticação = registrar outra implementação da porta, sem tocar em 
 | Unidade — aplicação | orquestração dos use cases (replay, conflitos, inbox, corrida de unicidade, PENDING_REFERENCE, outbox) sobre um `UnitOfWork` em memória com commit/rollback | `test/unit/application` |
 | Unidade — bordas | erro → status HTTP, resultado → status, classificação SQS, SQLSTATE → transitório, decisões do handler SQS, guard, config; **consumer SQS** com cliente roteirizado (poll que falha, retry com ordem do grupo, tentativas reais, DLQ, ack que falha, heartbeat, shutdown com grace estourado); ticks dos workers | `test/unit/interfaces` |
 | Unidade — infraestrutura | logs estruturados (campos, contexto por mensagem, serialização de erro, mascaramento de valores monetários, redação) | `test/unit/infrastructure` |
-| Integração | migrations up/down, cada constraint/trigger, atomicidade (falha injetada antes do commit), API, outbox (2 publishers, crash, retry, duplicata), consumer (inbox, redelivery, retry, DLQ, shutdown), fora de ordem | `test/integration` |
+| Integração | migrations up/down/up, cada constraint/trigger, atomicidade (falha injetada antes do commit), API, outbox (2 publishers, crash, lease, retry, duplicata, métricas de backlog), consumer (inbox, redelivery, retry, DLQ, shutdown), fora de ordem, health checks com o SQS inalcançável | `test/integration` |
 | Concorrência | 100−80−80 (25×), hot wallet, 50× mesma aposta, wallets em paralelo, BET/WIN e REFUND/ROLLBACK simultâneos, 3 processos, crash antes do ack, SIGKILL + reinício | `test/concurrency` |
 
 - **Sem mocks de Postgres ou SQS nos testes de integração e concorrência:** rodam contra os containers
