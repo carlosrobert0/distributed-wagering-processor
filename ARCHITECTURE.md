@@ -461,7 +461,7 @@ contenção, nada quebra (0 erros, 0 inconsistências) e onde está o gargalo �
 
 ## 15. Convenções de código
 
-- Sem comentários no código: nomes de classes, métodos, constantes e constraints carregam a intenção;
+- Sem comentários no código TypeScript (`src/` e `test/`): nomes de classes, métodos, constantes e constraints carregam a intenção;
   o *porquê* das decisões vive neste documento e no `SPEC.md`.
 - Formatação única com Prettier (`bun run format` / `bun run format:check`) e TypeScript strict
   (`noUncheckedIndexedAccess`, `noImplicitOverride`).
