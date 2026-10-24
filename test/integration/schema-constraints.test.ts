@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { PoolClient } from 'pg';
 import { prepareTestDatabase } from '../support/environment';
-import { db, inTransaction } from '../support/database';
+import { db, expectWalletMatchesLedger, inTransaction } from '../support/database';
 
 interface Seed {
   walletId: string;
@@ -485,5 +485,6 @@ describe('constraints do schema (§5 restrição 9)', () => {
       [seed.walletId],
     );
     expect(rows[0]).toEqual({ balance: '70.00', version: 2 });
+    await expectWalletMatchesLedger(seed.walletId);
   });
 });

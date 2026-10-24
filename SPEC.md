@@ -1,7 +1,7 @@
 # SPEC — Distributed Wagering Processor
 
 Especificação derivada do enunciado (`README-desafio.md`). Cada requisito tem um ID estável.
-Código e testes referenciam esses IDs (busque por `AC-` no repositório). Quando o enunciado
+Os testes referenciam esses IDs (busque por `AC-` em `test/`); o código não tem comentários, então a rastreabilidade vai pelo mapa da seção 12. Quando o enunciado
 deixa espaço para interpretação, a decisão está registrada na seção **Interpretações** (`INT-`).
 
 Legenda de origem: `§N` = seção do enunciado.
@@ -19,7 +19,7 @@ Legenda de origem: `§N` = seção do enunciado.
 | INV-05 | Correto com N instâncias | lock pessimista por linha (`SELECT … FOR UPDATE`) + constraints; nenhum estado compartilhado em memória |
 | INV-06 | Evento nunca publicado antes do commit | Transactional Outbox: evento gravado na mesma transação SQL e publicado por um relay depois |
 | INV-07 | Ledger auditável e imutável | triggers que bloqueiam `UPDATE/DELETE/TRUNCATE`, encadeamento `balance_before/after` verificado no banco |
-| INV-08 | `wallet.balance == saldo reconstruído pelo ledger` | trigger de constraint diferida + reconciliação + asserção final em todos os testes de integração/concorrência |
+| INV-08 | `wallet.balance == saldo reconstruído pelo ledger` | trigger de constraint diferida + reconciliação + asserção final nos testes de integração/concorrência que gravam wallets (`migrations` e `readiness` não criam wallets) |
 
 ---
 
@@ -27,7 +27,7 @@ Legenda de origem: `§N` = seção do enunciado.
 
 | ID | Critério de aceite |
 |---|---|
-| AC-MON-01 | `Money.from({amount, currency})` aceita somente string decimal com exatamente 2 casas (`^(0|[1-9]\d*)\.\d{2}$`) |
+| AC-MON-01 | `Money.from({amount, currency})` aceita somente string decimal com exatamente 2 casas e até 18 dígitos inteiros (`^(0|[1-9]\d{0,17})\.\d{2}$`) |
 | AC-MON-02 | Rejeita `NaN`, `Infinity`, notação científica, string vazia, mais de 2 casas, valores negativos, sinal `+`, espaços, zeros à esquerda |
 | AC-MON-03 | Moeda ISO-4217: 3 letras maiúsculas |
 | AC-MON-04 | Imutável: `add/subtract/negate` retornam nova instância |
@@ -178,7 +178,7 @@ Erros que **não** viram transação persistida (respondidos diretamente): `INVA
 | AC-OUT-01 | Transação, saldo, ledger, inbox e evento gravados atomicamente |
 | AC-OUT-02 | Relay com múltiplos publishers concorrentes: claim com `FOR UPDATE SKIP LOCKED` + lease configurável (`OUTBOX_LEASE_MS`, padrão 30 s) em transação curta; publicação fora da transação |
 | AC-OUT-03 | Commit → processo morre → outra instância publica |
-| AC-OUT-04 | Publicação duplicada é segura (`eventId` estável = `MessageDeduplicationId`; consumidor deduplica por `eventId`) |
+| AC-OUT-04 | Publicação duplicada é segura: `eventId` estável entre republicações; o SQS FIFO deduplica dentro de ~5 min (`MessageDeduplicationId = eventId`) e, fora dessa janela, o evento chega duplicado e idêntico — o consumidor a jusante deduplica por `eventId` |
 | AC-OUT-05 | Eventos: `WagerTransactionProcessed` (inclusive LOSS e OPENING), `WagerTransactionRejected`, `WalletBalanceChanged` (somente quando o saldo muda), `WagerTransactionPendingReference` |
 | AC-OUT-06 | Envelope: classe abstrata `IntegrationEvent<T>`, `eventType`/`version` no tipo, `data` com `MoneyProps` |
 | AC-OUT-07 | Falha de publicação ⇒ `attempts++` e backoff exponencial com teto; nunca descarta (INT-08) |
@@ -214,7 +214,7 @@ Erros que **não** viram transação persistida (respondidos diretamente): `INVA
 | Worker morto após commit, antes do ack | `test/concurrency/crash-before-ack.test.ts` |
 | Dois publishers na mesma outbox | `test/integration/outbox-relay.test.ts` |
 | ROLLBACK/REFUND antes da referência | `test/integration/out-of-order.test.ts`, `test/concurrency/out-of-order-race.test.ts` |
-| Invariante final `balance == ledger` | `test/support/invariants.ts`, chamado em todos os testes de integração/concorrência |
+| Invariante final `balance == ledger` | `expectWalletMatchesLedger` / `expectAllWalletsMatchLedger` em `test/support/database.ts`, chamados em todos os testes de integração/concorrência que gravam wallets |
 
 ---
 

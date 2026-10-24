@@ -1,6 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import pino from 'pino';
+import { SendMessageCommand } from '@aws-sdk/client-sqs';
+import { TransientInfrastructureError } from '../../src/application/errors';
 import { PublishOutboxUseCase } from '../../src/application/messaging/publish-outbox.use-case';
 import { EventPublisher } from '../../src/application/ports/system';
 import { OutboxMessage } from '../../src/domain/messaging/outbox-message';
@@ -256,6 +258,55 @@ describe('outbox relay', () => {
     expect(after).toMatch(/^wagering_outbox_lag_seconds 0$/m);
     expect(after).toMatch(/^wagering_outbox_published_total 2$/m);
     await drainMessages(queues.events);
+  });
+
+  test('republicação fora da janela de deduplicação do SQS: o evento chega duplicado, idêntico e com o mesmo eventId (§11 passo 5)', async () => {
+    const walletIds = await produceEvents(1, 0);
+    let runs = 0;
+    const failingToRecord = {
+      run: <T>(work: Parameters<typeof instanceA.uow.run<T>>[0]) => {
+        runs += 1;
+        if (runs === 2) throw new TransientInfrastructureError('db down', 'connection');
+        return instanceA.uow.run(work);
+      },
+    };
+    const sendWithFreshDeduplicationId: EventPublisher = {
+      publish: async (message: OutboxMessage) => {
+        await sqsQueues.client.send(
+          new SendMessageCommand({
+            QueueUrl: await sqsQueues.url(queues.events),
+            MessageBody: JSON.stringify(message.payload),
+            MessageGroupId: message.partitionKey,
+            MessageDeduplicationId: `${message.id}:${randomUUID()}`,
+          }),
+        );
+      },
+    };
+
+    const first = new PublishOutboxUseCase(
+      failingToRecord,
+      new SqsEventPublisher(sqsQueues, queues.events),
+      clock,
+      new PrometheusMetrics({ collectDefaults: false }),
+      logger,
+    );
+    expect(await first.publishBatch(50)).toMatchObject({ published: 0 });
+    expect(await pendingFor(walletIds)).toBe(2);
+
+    await forceDue(walletIds);
+    await relay(instanceB, sendWithFreshDeduplicationId).publishBatch(50);
+    expect(await pendingFor(walletIds)).toBe(0);
+
+    const bodies = (await drainMessages(queues.events)).map((message) => message.Body!);
+    const byEventId = new Map<string, string[]>();
+    for (const body of bodies) {
+      const { eventId } = JSON.parse(body) as { eventId: string };
+      byEventId.set(eventId, [...(byEventId.get(eventId) ?? []), body]);
+    }
+    expect(byEventId.size).toBe(2);
+    const duplicated = [...byEventId.values()].filter((copies) => copies.length === 2);
+    expect(duplicated).toHaveLength(1);
+    expect(duplicated[0]![0]).toBe(duplicated[0]![1]);
   });
 
   test('publicação duplicada é segura: mesmo eventId, deduplicado pela fila FIFO (AC-OUT-04)', async () => {

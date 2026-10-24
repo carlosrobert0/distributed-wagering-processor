@@ -318,6 +318,7 @@ inbox (e a idempotency key) → só faz ack. Testado com um processo real morto 
   3. grava `published_at` com `UPDATE … WHERE published_at IS NULL`; retry e devolução do lote só são
      gravados se a instância ainda detém o lease (`AND next_attempt_at = lease`).
   Nenhum lock de banco fica preso durante a chamada de rede; publishers concorrentes pegam lotes disjuntos.
+- **Consumidor dos eventos:** este serviço apenas publica em `wagering-events.fifo`; quem consome deduplica por `eventId`. O `eventId` é estável entre republicações (inclusive depois da janela de 5 min do SQS, onde o evento chega duplicado e idêntico — coberto por teste de integração).
 - **At-least-once:** se o processo morre depois de publicar e antes do passo 3, o lease expira e outra
   instância republica com o **mesmo `eventId`**. Deduplicação: `MessageDeduplicationId = eventId` na
   fila FIFO (janela de 5 min, otimização) e, como garantia, o consumidor deduplica por `eventId`.
